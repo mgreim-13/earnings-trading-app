@@ -1,0 +1,251 @@
+"""
+Tests for utility modules.
+"""
+
+import pytest
+import time
+from unittest.mock import Mock, patch, MagicMock
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+
+# Import the actual functions from filters.py
+from utils.filters import (
+    filter_dates, 
+    yang_zhang, 
+    build_term_structure, 
+    get_current_price, 
+    calculate_rsi, 
+    get_dynamic_thresholds, 
+    get_partial_score, 
+    compute_recommendation
+)
+from utils.cache_service import CacheService
+from utils.yfinance_cache import yf_cache, with_retry
+
+
+class TestFilters:
+    """Test the filters module functions."""
+    
+    @pytest.mark.unit
+    def test_filter_dates(self):
+        """Test date filtering functionality."""
+        # Test with future dates (45+ days from now)
+        future_date = (datetime.today() + timedelta(days=50)).strftime("%Y-%m-%d")
+        dates = [future_date, "2025-12-31", "2026-01-01"]
+        result = filter_dates(dates)
+        assert len(result) > 0
+        assert all(datetime.strptime(date, "%Y-%m-%d").date() >= (datetime.today().date() + timedelta(days=45)) for date in result)
+    
+    @pytest.mark.unit
+    def test_yang_zhang(self):
+        """Test Yang-Zhang volatility calculation."""
+        # Create sample price data
+        dates = pd.date_range('2024-01-01', periods=50, freq='D')
+        price_data = pd.DataFrame({
+            'High': np.random.uniform(100, 110, 50),
+            'Open': np.random.uniform(100, 110, 50),
+            'Low': np.random.uniform(90, 100, 50),
+            'Close': np.random.uniform(100, 110, 50)
+        }, index=dates)
+        
+        result = yang_zhang(price_data, window=30)
+        assert isinstance(result, float)
+        assert result > 0
+    
+    @pytest.mark.unit
+    def test_build_term_structure(self):
+        """Test term structure building."""
+        days = [30, 60, 90]
+        ivs = [0.2, 0.25, 0.3]
+        
+        term_spline = build_term_structure(days, ivs)
+        result = term_spline(45)
+        
+        assert isinstance(result, float)
+        assert 0.2 <= result <= 0.3
+    
+    @pytest.mark.unit
+    @patch('utils.filters.yf_cache.get_ticker_history')
+    def test_get_current_price(self, mock_cache):
+        """Test current price retrieval."""
+        mock_cache.return_value = pd.DataFrame({
+            'Close': [100.0]
+        })
+        
+        result = get_current_price("AAPL")
+        assert result == 100.0
+    
+    @pytest.mark.unit
+    def test_calculate_rsi(self):
+        """Test RSI calculation."""
+        prices = pd.Series([100, 101, 102, 101, 100, 99, 98, 97, 96, 95, 94, 93, 92, 91, 90])
+        rsi = calculate_rsi(prices, period=14)
+        
+        assert isinstance(rsi.iloc[-1], float)
+        assert 0 <= rsi.iloc[-1] <= 100
+    
+    @pytest.mark.unit
+    @patch('utils.filters.yf.Ticker')
+    def test_get_dynamic_thresholds(self, mock_ticker):
+        """Test dynamic threshold calculation."""
+        mock_stock = Mock()
+        mock_stock.info = {
+            'marketCap': 5000000000,  # 5B market cap
+            'sector': 'Technology'
+        }
+        mock_stock.history.return_value = pd.DataFrame({
+            'High': np.random.uniform(100, 110, 252),
+            'Open': np.random.uniform(100, 110, 252),
+            'Low': np.random.uniform(90, 100, 252),
+            'Close': np.random.uniform(100, 110, 252)
+        })
+        
+        thresholds = get_dynamic_thresholds(mock_stock)
+        assert isinstance(thresholds, dict)
+        assert 'min_iv_rv_ratio' in thresholds
+    
+    @pytest.mark.unit
+    def test_get_partial_score(self):
+        """Test partial scoring functionality."""
+        # Test minimum threshold
+        score = get_partial_score(100, 90, is_min=True)
+        assert score == 1.0
+        
+        # Test maximum threshold
+        score = get_partial_score(80, 90, is_min=False)
+        assert score == 1.0
+        
+        # Test marginal case
+        score = get_partial_score(85, 90, is_min=True, margin=0.1)
+        assert score == 0.5
+    
+    @pytest.mark.unit
+    @patch('utils.filters.yf.Ticker')
+    def test_compute_recommendation(self, mock_ticker):
+        """Test recommendation computation."""
+        mock_stock = Mock()
+        mock_stock.options = ["2025-12-31", "2026-01-31"]  # Future dates
+        mock_stock.option_chain.return_value = Mock(
+            calls=pd.DataFrame({
+                'strike': [100, 101, 102],
+                'impliedVolatility': [0.2, 0.21, 0.22],
+                'bid': [5, 4, 3],
+                'ask': [5.5, 4.5, 3.5],
+                'openInterest': [100, 200, 300],
+                'volume': [50, 100, 150]
+            }),
+            puts=pd.DataFrame({
+                'strike': [100, 101, 102],
+                'impliedVolatility': [0.2, 0.21, 0.22],
+                'bid': [5, 4, 3],
+                'ask': [5.5, 4.5, 3.5],
+                'openInterest': [100, 200, 300],
+                'volume': [50, 100, 150]
+            })
+        )
+        mock_stock.info = {
+            'marketCap': 5000000000,
+            'sector': 'Technology',
+            'beta': 1.2,
+            'shortPercentOfFloat': 0.05,
+            'recommendationMean': 2.0
+        }
+        mock_stock.earnings_dates = pd.DataFrame({
+            'Earnings Date': pd.date_range('2023-01-01', periods=4, freq='QE')
+        })
+        
+        # Set the mock_ticker to return our mock_stock
+        mock_ticker.return_value = mock_stock
+        
+        with patch('utils.filters.get_current_price', return_value=100.0), \
+             patch('utils.filters.yang_zhang', return_value=0.25), \
+             patch('utils.filters.yf_cache.get_ticker_history') as mock_cache, \
+             patch('utils.filters.get_dynamic_thresholds') as mock_thresholds:
+            
+            # Mock the dynamic thresholds to return a valid dict
+            mock_thresholds.return_value = {
+                'min_iv_rv_ratio': 1.1,
+                'max_ts_slope': -0.00406,
+                'max_opt_spread': 0.1,
+                'max_short_pct': 10.0,
+                'rsi_lower': 40,
+                'rsi_upper': 60,
+                'max_analyst_rec': 2.5,
+                'min_avg_volume': 1000000,
+                'min_atm_oi': 100,
+                'min_opt_volume': 50,
+                'max_hist_earn_move': 20.0,
+                'min_iv_percentile': 50,
+                'max_beta': 2.0  # Added missing key
+            }
+            
+            mock_cache.return_value = pd.DataFrame({
+                'Close': np.random.uniform(100, 110, 90),
+                'Volume': np.random.uniform(1000000, 5000000, 90)
+            })
+            
+            result = compute_recommendation("AAPL")
+            assert isinstance(result, dict)
+            assert 'total_score' in result
+            assert 'recommendation' in result
+
+class TestCacheService:
+    """Test the cache service."""
+    
+    @pytest.mark.unit
+    def test_cache_service_initialization(self):
+        """Test cache service initialization."""
+        cache = CacheService()
+        assert cache is not None
+    
+    @pytest.mark.unit
+    def test_cache_get_cached_scan_result(self):
+        """Test getting cached scan results."""
+        cache = CacheService()
+        # This will test the actual method that exists
+        result = cache.get_cached_scan_result("AAPL")
+        # Should return None if no cache exists, but not crash
+        assert result is None or isinstance(result, dict)
+    
+    @pytest.mark.unit
+    def test_cache_get_or_compute_scan_result(self):
+        """Test get or compute scan result."""
+        cache = CacheService()
+        # This will test the actual method that exists
+        result = cache.get_or_compute_scan_result("AAPL")
+        # Should return a result dict
+        assert isinstance(result, dict)
+        assert 'recommendation' in result
+    
+    @pytest.mark.unit
+    def test_cache_clear_cache(self):
+        """Test clearing cache."""
+        cache = CacheService()
+        # This should not crash
+        cache.clear_cache()
+
+class TestYFinanceCache:
+    """Test the yfinance cache functionality."""
+    
+    @pytest.mark.unit
+    def test_yf_cache_initialization(self):
+        """Test yfinance cache initialization."""
+        assert yf_cache is not None
+    
+    @pytest.mark.unit
+    @patch('utils.yfinance_cache.yf.Ticker')
+    def test_with_retry_decorator(self, mock_ticker):
+        """Test the retry decorator."""
+        mock_stock = Mock()
+        mock_stock.history.return_value = pd.DataFrame({
+            'Close': [100.0]
+        })
+        mock_ticker.return_value = mock_stock
+        
+        @with_retry(max_retries=2, delay=0.1)
+        def test_function():
+            return "success"
+        
+        result = test_function()
+        assert result == "success"
