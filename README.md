@@ -11,7 +11,7 @@ A sophisticated automated options trading application that scans for earnings op
 - **Scheduled Execution**: Automated trade entry/exit at optimal times
 
 ### **Smart Scanning**
-- **Multi-Factor Analysis**: Combines volume, volatility, technical indicators, and analyst ratings
+- **Multi-Factor Analysis**: Combines volume, volatility, and technical indicators
 - **Real-Time Data**: Integrates with Alpaca, Finnhub, and yfinance for comprehensive market data
 - **Customizable Filters**: Adjustable scoring thresholds and filter weights
 - **Historical Analysis**: Learns from past earnings performance
@@ -49,7 +49,7 @@ A sophisticated automated options trading application that scans for earnings op
 - **Volume Analysis**: High average volume for liquidity
 - **Volatility**: IV30 vs RV30 comparison
 - **Technical Indicators**: RSI, beta, short interest
-- **Analyst Ratings**: Earnings expectations and revisions
+
 
 ## 🔍 **Stock Filtering System**
 
@@ -59,16 +59,17 @@ The app uses a sophisticated **10-factor scoring algorithm** that evaluates stoc
 
 | Filter | Weight | Description | Thresholds |
 |--------|--------|-------------|------------|
-| **IV30/RV30 Ratio** | 20% | Implied vs Realized Volatility comparison | Large: 1.2+, Mid: 1.3+, Small: 1.4+ |
-| **Term Structure Slope** | 17% | Volatility curve steepness (0-45 days) | Large: -0.00406 max, Mid: -0.003 max, Small: -0.002 max |
-| **Option Liquidity** | 18% | Open interest, volume, bid-ask spreads | Large: OI 500+, Vol 100+, Spread 15% max |
-| **Historical Earnings Volatility** | 13% | Past earnings move magnitude | Large: 8% max, Mid: 12% max, Small: 15% max |
-| **Average Volume** | 11% | Stock trading volume requirements | Large: 1M+, Mid: 500K+, Small: 200K+ |
-| **IV Percentile** | 10% | Current IV vs historical IV ranking | Large: 50+, Mid: 45+, Small: 40+ |
-| **Beta** | 4% | Market correlation measure | Large: 1.5 max, Mid: 1.8 max, Small: 2.2 max |
-| **Short Interest** | 4% | Short selling activity | Large: 5% max, Mid: 8% max, Small: 12% max |
+| **IV30/RV30 Ratio** | 20% | Implied vs Realized Volatility comparison | Large: 1.3+, Mid: 1.4+, Small: 1.5+ |
+| **Term Structure Slope** | 17% | Volatility curve steepness (0-45 days) | Large: -0.004 max, Mid: -0.003 max, Small: -0.002 max |
+| **Option Liquidity** | 18% | Open interest, volume, bid-ask spreads | Large: OI 1000+, Vol 250+, Spread 10% max |
+| **Historical Earnings Volatility** | 18% | Past earnings move magnitude | Large: 8% max, Mid: 12% max, Small: 15% max |
+| **Average Volume** | 12% | Stock trading volume requirements | Large: 1M+, Mid: 500K+, Small: 300K+ |
+| **IV Percentile** | 10% | Current IV vs historical IV ranking | Large: 60+, Mid: 55+, Small: 50+ |
+| **Beta** | 7% | Market correlation measure | Large: 1.3 max, Mid: 1.6 max, Small: 2.0 max |
+| **Short Interest** | 4% | Short selling activity | Large: 5% max, Mid: 7% max, Small: 10% max |
 | **RSI** | 2% | Relative Strength Index | Large: 35-65, Mid: 30-70, Small: 25-75 |
-| **Analyst Recommendations** | 1% | Wall Street consensus | Large: 2.0 max, Mid: 2.5 max, Small: 3.0 max |
+| **Analyst Recommendations** | 2% | Wall Street consensus | Large: 2.0 max, Mid: 2.5 max, Small: 3.0 max |
+
 
 ### **Market Cap Tier System**
 
@@ -76,18 +77,18 @@ The app automatically adjusts thresholds based on market capitalization:
 
 #### **Large Cap (>$10B)**
 - **Volume**: 1M+ shares/day
-- **IV/RV Ratio**: 1.2+
-- **Term Structure**: -0.00406 max slope
+- **IV/RV Ratio**: 1.3+
+- **Term Structure**: -0.004 max slope
 - **Earnings Volatility**: 8% max move
-- **Options**: OI 500+, Volume 100+, Spread 15% max
+- **Options**: OI 1000+, Volume 250+, Spread 10% max
 - **Risk Profile**: Conservative thresholds for stability
 
 #### **Mid Cap ($2B-$10B)**
 - **Volume**: 500K+ shares/day
-- **IV/RV Ratio**: 1.3+
+- **IV/RV Ratio**: 1.4+
 - **Term Structure**: -0.003 max slope
 - **Earnings Volatility**: 12% max move
-- **Options**: OI 300+, Volume 50+, Spread 20% max
+- **Options**: OI 750+, Volume 150+, Spread 12% max
 - **Risk Profile**: Balanced thresholds for growth potential
 
 #### **Small Cap (<$2B)**

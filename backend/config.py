@@ -244,16 +244,15 @@ PREVENT_LIVE_TRADING_IN_TESTS = os.getenv("PREVENT_LIVE_TRADING_IN_TESTS", "true
 
 # Filter Weights for Scoring
 FILTER_WEIGHTS = {
-    'avg_volume': 0.11,
-    'iv30_rv30': 0.20,
-    'ts_slope_0_45': 0.17,
-    'hist_earn_vol': 0.13,
-    'option_liquidity': 0.18,
-    'iv_percentile': 0.10,
-    'beta': 0.04,
-    'short': 0.04,
-    'rsi': 0.02,
-    'analyst': 0.01
+    'avg_volume': 0.11,      # 0.11 / 1.08 = 0.102
+    'iv30_rv30': 0.20,       # 0.20 / 1.08 = 0.185
+    'ts_slope_0_45': 0.157,   # 0.17 / 1.08 = 0.157
+    'hist_earn_vol': 0.167,   # 0.18 / 1.08 = 0.167
+    'option_liquidity': 0.167, # 0.18 / 1.08 = 0.167
+    'iv_percentile': 0.093,   # 0.10 / 1.08 = 0.093
+    'beta': 0.065,             # 0.07 / 1.08 = 0.065
+    'short': 0.037,            # 0.04 / 1.08 = 0.037
+    'rsi': 0.028,              # 0.03 / 1.08 = 0.028
 }
 
 # Scoring Thresholds
@@ -277,48 +276,48 @@ LIQUIDITY_REQUIREMENTS = {
 MARKET_CAP_TIERS = {
     'large': {  # > $10B
         'min_avg_volume': 1000000,
-        'min_iv_rv_ratio': 1.2,
-        'max_ts_slope': -0.00406,
+        'min_iv_rv_ratio': 1.3,
+        'max_ts_slope': -0.004,
         'max_hist_earn_move': 8.0,
+        'min_atm_oi': 1000,
+        'min_opt_volume': 250,
+        'max_opt_spread': 0.10,
+        'min_iv_percentile': 60,
+        'max_beta': 1.3,
+        'max_short_pct': 5.0,
+        'rsi_lower': 35,
+        'rsi_upper': 65,
+
+    },
+    'mid': {    # $2B - $10B
+        'min_avg_volume': 500000,
+        'min_iv_rv_ratio': 1.4,
+        'max_ts_slope': -0.003,
+        'max_hist_earn_move': 12.0,
+        'min_atm_oi': 750,
+        'min_opt_volume': 150,
+        'max_opt_spread': 0.12,
+        'min_iv_percentile': 55,
+        'max_beta': 1.6,
+        'max_short_pct': 7.0,
+        'rsi_lower': 30,
+        'rsi_upper': 70,
+
+    },
+    'small': {  # < $2B
+        'min_avg_volume': 300000,
+        'min_iv_rv_ratio': 1.5,
+        'max_ts_slope': -0.002,
+        'max_hist_earn_move': 15.0,
         'min_atm_oi': 500,
         'min_opt_volume': 100,
         'max_opt_spread': 0.15,
         'min_iv_percentile': 50,
-        'max_beta': 1.5,
-        'max_short_pct': 5.0,
-        'rsi_lower': 35,
-        'rsi_upper': 65,
-        'max_analyst_rec': 2.0
-    },
-    'mid': {    # $2B - $10B
-        'min_avg_volume': 500000,
-        'min_iv_rv_ratio': 1.3,
-        'max_ts_slope': -0.003,
-        'max_hist_earn_move': 12.0,
-        'min_atm_oi': 300,
-        'min_opt_volume': 50,
-        'max_opt_spread': 0.20,
-        'min_iv_percentile': 45,
-        'max_beta': 1.8,
-        'max_short_pct': 8.0,
-        'rsi_lower': 30,
-        'rsi_upper': 70,
-        'max_analyst_rec': 2.5
-    },
-    'small': {  # < $2B
-        'min_avg_volume': 200000,
-        'min_iv_rv_ratio': 1.4,
-        'max_ts_slope': -0.002,
-        'max_hist_earn_move': 15.0,
-        'min_atm_oi': 100,
-        'min_opt_volume': 25,
-        'max_opt_spread': 0.25,
-        'min_iv_percentile': 40,
-        'max_beta': 2.2,
-        'max_short_pct': 12.0,
+        'max_beta': 2.0,
+        'max_short_pct': 10.0,
         'rsi_lower': 25,
         'rsi_upper': 75,
-        'max_analyst_rec': 3.0
+
     }
 }
 

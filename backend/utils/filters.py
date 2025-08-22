@@ -199,7 +199,7 @@ def get_dynamic_thresholds(stock):
         thresholds['max_short_pct'] = 10.0
         thresholds['rsi_lower'] = 40
         thresholds['rsi_upper'] = 60
-        thresholds['max_analyst_rec'] = 2.5
+
         
         return thresholds
         
@@ -407,10 +407,10 @@ def compute_recommendation(ticker):
         # Stock Fundamentals/Technicals
         beta = stock.info.get('beta', None)
         short_pct = stock.info.get('shortPercentOfFloat', None) * 100 if stock.info.get('shortPercentOfFloat') is not None else None
-        recommendation_mean = stock.info.get('recommendationMean', None)
+
         rsi = calculate_rsi(price_history['Close']).iloc[-1]
         
-        # Sentiment and External Factors (analyst rec as proxy; short interest for risk)
+        # Sentiment and External Factors (short interest for risk)
         # Note: More advanced sentiment (news) could be added with NLP libraries if available
         
         # Get dynamic thresholds based on stock characteristics
@@ -436,7 +436,7 @@ def compute_recommendation(ticker):
         scores['beta'] = get_partial_score(beta, thresholds['max_beta'], is_min=False) if beta is not None else 0.0
         scores['short'] = get_partial_score(short_pct, thresholds['max_short_pct'], is_min=False) if short_pct is not None else 0.0
         scores['rsi'] = 1.0 if thresholds['rsi_lower'] <= rsi <= thresholds['rsi_upper'] else (0.5 if abs(rsi - 50) < config.SCORING_THRESHOLDS['rsi_neutral_zone'] else 0.0)  # Marginal for near-neutral
-        scores['analyst'] = get_partial_score(recommendation_mean, thresholds['max_analyst_rec'], is_min=False) if recommendation_mean is not None else 0.0
+
         
         # Calculate total weighted score
         total_score = sum(scores[filter_name] * config.FILTER_WEIGHTS[filter_name] for filter_name in scores) * 100  # As percentage

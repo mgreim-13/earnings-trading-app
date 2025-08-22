@@ -357,16 +357,16 @@ const UpcomingEarnings = () => {
     const weights = filterWeights && Object.keys(filterWeights).length > 0 
       ? filterWeights 
       : {
-          'avg_volume': 0.11,
-          'iv30_rv30': 0.20,
-          'ts_slope_0_45': 0.17,
-          'hist_earn_vol': 0.12,
-          'option_liquidity': 0.19,
-          'iv_percentile': 0.10,
-          'beta': 0.04,
-          'short': 0.04,
-          'rsi': 0.02,
-          'analyst': 0.01
+          'avg_volume': 0.102,
+          'iv30_rv30': 0.185,
+          'ts_slope_0_45': 0.157,
+          'hist_earn_vol': 0.167,
+          'option_liquidity': 0.167,
+          'iv_percentile': 0.093,
+          'beta': 0.065,
+          'short': 0.037,
+          'rsi': 0.028,
+
         };
     
     return weights[filterName] || 0;
@@ -407,8 +407,7 @@ const UpcomingEarnings = () => {
         return 'Short %';
       case 'rsi':
         return 'RSI';
-      case 'analyst':
-        return 'Analyst Rec';
+
       default:
         return filterName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
     }

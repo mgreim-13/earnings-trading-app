@@ -149,7 +149,7 @@ class TestFilters:
             'sector': 'Technology',
             'beta': 1.2,
             'shortPercentOfFloat': 0.05,
-            'recommendationMean': 2.0
+
         }
         mock_stock.earnings_dates = pd.DataFrame({
             'Earnings Date': pd.date_range('2023-01-01', periods=4, freq='QE')
@@ -171,7 +171,7 @@ class TestFilters:
                 'max_short_pct': 10.0,
                 'rsi_lower': 40,
                 'rsi_upper': 60,
-                'max_analyst_rec': 2.5,
+
                 'min_avg_volume': 1000000,
                 'min_atm_oi': 100,
                 'min_opt_volume': 50,
