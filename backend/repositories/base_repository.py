@@ -212,8 +212,7 @@ class BaseRepository:
             logger.error(f"❌ Update execution failed: {e}")
             logger.error(f"   Query: {query}")
             logger.error(f"   Params: {params}")
-            import traceback
-            logger.error(f"   Full traceback: {traceback.format_exc()}")
+            logger.error(f"   Full traceback: {e}")
             return False
     
     def execute_scalar(self, query: str, params: tuple = ()) -> Optional[any]:
@@ -246,8 +245,14 @@ class BaseRepository:
     def get_table_info(self, table_name: str) -> List[Dict]:
         """Get table schema information."""
         try:
-            query = "PRAGMA table_info(?)"
-            return self.execute_query(query, (table_name,))
+            # PRAGMA statements don't support parameterized queries in SQLite
+            # Validate table name to prevent injection (alphanumeric and underscore only)
+            if not table_name.replace('_', '').isalnum():
+                logger.error(f"❌ Invalid table name format: {table_name}")
+                return []
+            
+            query = f"PRAGMA table_info({table_name})"
+            return self.execute_query(query)
             
         except Exception as e:
             logger.error(f"❌ Error getting table info for {table_name}: {e}")

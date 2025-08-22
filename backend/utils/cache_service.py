@@ -26,7 +26,8 @@ class CacheService:
     def get_cached_scan_results(self, tickers: List[str], ttl_minutes: int = 5) -> Dict[str, Dict]:
         """Get cached scan results for multiple tickers."""
         try:
-            return self.db.get_cached_scan_results(tickers, ttl_minutes=ttl_minutes)
+            results = self.db.get_cached_scan_results(tickers, ttl_minutes)
+            return results
         except Exception as e:
             logger.error(f"Failed to get cached results for {len(tickers)} tickers: {e}")
             return {}
@@ -95,6 +96,7 @@ class CacheService:
                 try:
                     result = self.get_or_compute_scan_result(ticker, ttl_minutes=ttl_minutes)
                     fresh_results[ticker] = result
+                        
                 except Exception as e:
                     logger.error(f"Failed to compute scan result for {ticker}: {e}")
                     continue
@@ -116,7 +118,7 @@ class CacheService:
                 'earnings_date': earnings_date,
                 'earnings_time': 'amc',  # Default earnings time
                 'recommendation_score': scan_result.get('total_score', 0),
-                'filters': scan_result.get('filters', {}),
+                'filters': scan_result.get('scores', {}),  # Store scores in filters column
                 'reasoning': scan_result.get('reasoning', ''),
                 'ticker': ticker
             })
@@ -124,11 +126,11 @@ class CacheService:
             success = self.db.add_scan_result(cache_data)
             if success:
                 logger.info(f"✅ Cached scan result for {ticker}")
-            else:
-                logger.warning(f"❌ Failed to cache scan result for {ticker}")
+            return success
                 
         except Exception as e:
             logger.error(f"Failed to cache scan result for {ticker}: {e}")
+            return False
     
     def clear_cache(self, older_than_minutes: int = None):
         """Clear cached results, optionally only those older than specified minutes."""

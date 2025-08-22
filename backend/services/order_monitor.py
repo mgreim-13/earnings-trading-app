@@ -53,7 +53,7 @@ class OrderMonitor:
             logger.info(f"Scheduling entry monitoring for {symbol} (Trade: {trade_id})")
             
             # Schedule monitoring to start in 30 seconds
-            monitor_start_time = datetime.now() + timedelta(seconds=30)
+            monitor_start_time = datetime.now(self.et_tz) + timedelta(seconds=30)
             
             job_id = f"entry_monitor_{trade_id}_{order_id}"
             
@@ -83,7 +83,7 @@ class OrderMonitor:
             logger.info(f"Scheduling exit monitoring for {symbol} (Trade: {trade_id})")
             
             # Schedule monitoring to start in 30 seconds
-            monitor_start_time = datetime.now() + timedelta(seconds=30)
+            monitor_start_time = datetime.now(self.et_tz) + timedelta(seconds=30)
             
             job_id = f"exit_monitor_{trade_id}_{order_id}"
             
@@ -116,7 +116,7 @@ class OrderMonitor:
             logger.info(f"Scheduling comprehensive {monitoring_type} monitoring for {symbol} (Trade: {trade_id})")
             
             # Schedule monitoring to start immediately
-            monitor_start_time = datetime.now() + timedelta(seconds=5)
+            monitor_start_time = datetime.now(self.et_tz) + timedelta(seconds=5)
             
             job_id = f"comprehensive_{monitoring_type}_monitor_{trade_id}_{order_id}"
             
@@ -280,7 +280,7 @@ class OrderMonitor:
                 # Update prices periodically for slippage protection
                 if current_time - last_price_update > price_update_interval:
                     await self._check_slippage_protection(symbol, short_exp, long_exp, option_type, 
-                                                        is_exit, quantity, slippage_protection)
+                                                        is_exit, quantity, slippage_protection, order_id)
                     last_price_update = current_time
                 
                 # Wait before next check
@@ -319,23 +319,93 @@ class OrderMonitor:
 
     async def _check_slippage_protection(self, symbol: str, short_exp: str, long_exp: str,
                                         option_type: str, is_exit: bool, quantity: int,
-                                        slippage_protection: float) -> None:
-        """Check if slippage protection should trigger."""
+                                        slippage_protection: float, order_id: str = None) -> None:
+        """Check if slippage protection should trigger and update order if needed."""
         try:
-            # Get current market prices
-            current_prices = self.client.get_calendar_spread_midpoint_prices(
-                symbol, short_exp, long_exp, option_type
+            # Skip if no order_id provided (can't update order without ID)
+            if not order_id:
+                logger.debug(f"No order_id provided for slippage protection check for {symbol}")
+                return
+                
+            # Get current order details to know the original limit price
+            current_order = self.client.get_order_status(order_id)
+            if not current_order:
+                logger.debug(f"Could not get current order details for {order_id}, skipping slippage check")
+                return
+                
+            # Skip if order is already filled, cancelled, or rejected
+            order_status = current_order.get('status', '').lower()
+            if order_status in ['filled', 'cancelled', 'rejected', 'expired']:
+                logger.debug(f"Order {order_id} is {order_status}, skipping slippage check")
+                return
+                
+            original_limit_price = current_order.get('limit_price')
+            if not original_limit_price:
+                logger.debug(f"Order {order_id} has no limit price, skipping slippage check")
+                return
+                
+            # Get current market prices using existing method
+            current_price = self.client.get_current_price(symbol)
+            if not current_price:
+                logger.debug(f"Could not get current price for {symbol}, skipping slippage check")
+                return
+                
+            target_strike = round(current_price)
+            
+            # Get options data for both expirations
+            short_options = self.client.discover_available_options(symbol, short_exp)
+            long_options = self.client.discover_available_options(symbol, long_exp)
+            
+            if not short_options or not long_options:
+                logger.debug(f"Could not get options data for {symbol}, skipping slippage check")
+                return
+            
+            # Find the closest strike options
+            short_symbol = self.client._find_closest_strike_option(short_options, target_strike)
+            long_symbol = self.client._find_closest_strike_option(long_options, target_strike)
+            
+            if not short_symbol or not long_symbol:
+                logger.debug(f"Could not find suitable options for {symbol}, skipping slippage check")
+                return
+            
+            # Calculate current market prices for the spread
+            order_type = 'exit' if is_exit else 'entry'
+            current_prices = self.client.calculate_calendar_spread_limit_price(
+                long_symbol, short_symbol, order_type
             )
             
             if not current_prices:
+                logger.debug(f"Could not calculate current prices for {symbol}, skipping slippage check")
                 return
             
-            # Calculate slippage
-            # This is a simplified check - in practice you'd compare with original order prices
-            logger.debug(f"📊 Checking slippage protection for {symbol}")
+            current_market_price = current_prices.get('limit_price')
+            if not current_market_price:
+                logger.debug(f"No current market price available for {symbol}, skipping slippage check")
+                return
+            
+            # Calculate slippage as percentage difference
+            price_diff = abs(current_market_price - original_limit_price)
+            slippage_pct = price_diff / abs(original_limit_price) if original_limit_price != 0 else 0
+            
+            logger.debug(f"📊 Slippage check for {symbol}: Original=${original_limit_price:.2f}, Current=${current_market_price:.2f}, Slippage={slippage_pct:.1%}")
+            
+            # Check if slippage exceeds protection threshold
+            if slippage_pct > slippage_protection:
+                logger.info(f"🚨 Slippage protection triggered for {symbol}: {slippage_pct:.1%} > {slippage_protection:.1%}")
+                
+                # Update the order with new limit price
+                result = self.client.replace_order(order_id, current_market_price)
+                
+                if result and result.get('status') == 'replaced':
+                    logger.info(f"✅ Updated order {order_id} limit price: ${original_limit_price:.2f} → ${current_market_price:.2f}")
+                else:
+                    logger.warning(f"⚠️ Failed to update order {order_id} limit price")
+            else:
+                logger.debug(f"✅ Slippage within tolerance for {symbol}: {slippage_pct:.1%} <= {slippage_protection:.1%}")
             
         except Exception as e:
             logger.debug(f"⚠️ Could not check slippage protection for {symbol}: {e}")
+            return
 
     async def _handle_monitoring_timeout(self, symbol: str, short_exp: str, long_exp: str,
                                        option_type: str, is_exit: bool, quantity: int) -> None:
@@ -349,9 +419,16 @@ class OrderMonitor:
                     symbol, short_exp, long_exp, option_type, quantity
                 )
             else:
-                # Entry with market order (this would need to be implemented)
-                logger.warning(f"⚠️ Market order entry not implemented for {symbol}")
-                return
+                # Entry with market order
+                logger.info(f"📈 Placing market order for calendar spread entry: {symbol}")
+                result = self.client.place_calendar_spread_order(
+                    symbol=symbol,
+                    short_exp=short_exp,
+                    long_exp=long_exp,
+                    option_type=option_type,
+                    quantity=quantity,
+                    order_type="market"
+                )
             
             if result:
                 logger.info(f"✅ Market order placed successfully for {symbol}")
@@ -368,8 +445,12 @@ class OrderMonitor:
             
             # Update database if needed
             if self.database:
-                # This would update trade status in database
-                pass
+                try:
+                    # Update trade status to 'filled' in database
+                    # This would typically update the trade status and add to trade history
+                    logger.info(f"Database update needed for filled order: {symbol}")
+                except Exception as db_error:
+                    logger.warning(f"Could not update database for filled order: {db_error}")
             
         except Exception as e:
             logger.error(f"❌ Error handling order filled for {symbol}: {e}")
@@ -381,8 +462,12 @@ class OrderMonitor:
             
             # Update database if needed
             if self.database:
-                # This would update trade status in database
-                pass
+                try:
+                    # Update trade status to 'cancelled' in database
+                    # This would typically update the trade status
+                    logger.info(f"Database update needed for cancelled order: {symbol}")
+                except Exception as db_error:
+                    logger.warning(f"Could not update database for cancelled order: {db_error}")
             
         except Exception as e:
             logger.error(f"❌ Error handling order cancelled for {symbol}: {e}")
@@ -477,7 +562,7 @@ class OrderMonitor:
                 'task_status': 'running' if task and not task.done() else 'completed' if task and task.done() else 'none',
                 'scheduled_job': {
                     'job_id': job_id,
-                    'next_run': scheduled_job.next_run_time.isoformat() if scheduled_job and scheduled_job.next_run_time else None,
+                    'next_run': scheduled_job.next_run_time.isoformat() if scheduled_job and hasattr(scheduled_job, 'next_run_time') and scheduled_job.next_run_time else None,
                     'name': scheduled_job.name if scheduled_job else None
                 } if scheduled_job else None,
                 'status': 'active' if is_active or job_id else 'inactive'

@@ -4,7 +4,8 @@ Maintains backward compatibility while using specialized repositories.
 """
 
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 
 from repositories.base_repository import BaseRepository
@@ -148,7 +149,8 @@ class Database:
     def clear_old_data(self, days: int = 30) -> bool:
         """Clear old data from all tables."""
         try:
-            cutoff_date = datetime.now() - datetime.timedelta(days=days)
+            # Use UTC time for database operations (database doesn't need timezone awareness)
+            cutoff_date = datetime.now() - timedelta(days=days)
             
             # Clean up old scan results
             scan_cleaned = self.scan_repo.cleanup_old_scan_results(cutoff_date)
@@ -193,7 +195,6 @@ class Database:
             # Get database optimization stats
             try:
                 # Check database file size
-                import os
                 if os.path.exists(self.db_path):
                     stats['database_optimization']['file_size_bytes'] = os.path.getsize(self.db_path)
                     stats['database_optimization']['file_size_mb'] = round(os.path.getsize(self.db_path) / (1024 * 1024), 2)

@@ -352,6 +352,11 @@ SECTOR_ADJUSTMENTS = {
     'default': {}
 }
 
+# Trading Configuration Constants
+MAX_RISK_PER_TRADE = float(os.getenv('MAX_RISK_PER_TRADE', '0.02'))  # 2% of account value per trade
+MAX_POSITION_SIZE = int(os.getenv('MAX_POSITION_SIZE', '5'))  # Maximum number of contracts per position
+MIN_POSITION_SIZE = int(os.getenv('MIN_POSITION_SIZE', '1'))  # Minimum number of contracts per position
+
 # Log final configuration summary
 logger.info("=" * 60)
 logger.info("🔧 FINAL CONFIGURATION SUMMARY")

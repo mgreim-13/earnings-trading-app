@@ -3,7 +3,9 @@ Settings Repository
 Handles all settings-related database operations.
 """
 
+import json
 import logging
+import sqlite3
 from datetime import datetime
 from typing import List, Dict, Optional
 from .base_repository import BaseRepository
@@ -38,8 +40,7 @@ class SettingsRepository(BaseRepository):
                 
         except Exception as e:
             logger.error(f"❌ Failed to get setting {key}: {e}")
-            import traceback
-            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+            logger.error(f"❌ Full traceback: {e}")
             return None
     
     def set_setting(self, key: str, value: str) -> bool:
@@ -102,8 +103,7 @@ class SettingsRepository(BaseRepository):
             
         except Exception as e:
             logger.error(f"❌ Failed to set setting {key}: {e}")
-            import traceback
-            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+            logger.error(f"❌ Full traceback: {e}")
             return False
     
     def get_all_settings(self) -> Dict[str, str]:
@@ -223,7 +223,6 @@ class SettingsRepository(BaseRepository):
             return default_value
         
         try:
-            import json
             return json.loads(value)
         except (json.JSONDecodeError, TypeError):
             logger.warning(f"⚠️ Could not parse JSON setting {key}='{value}', using default")
@@ -232,7 +231,6 @@ class SettingsRepository(BaseRepository):
     def set_json_setting(self, key: str, value: dict) -> bool:
         """Set a JSON setting value."""
         try:
-            import json
             json_value = json.dumps(value)
             return self.set_setting(key, json_value)
             
@@ -283,5 +281,4 @@ class SettingsRepository(BaseRepository):
     
     def _get_connection(self):
         """Get a database connection for transaction operations."""
-        import sqlite3
         return sqlite3.connect(self.db_path)

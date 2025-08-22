@@ -23,19 +23,46 @@ class ScanManager:
         self.database = database
         self.et_tz = pytz.timezone('US/Eastern')
 
+    def _create_scan_data(self, symbol: str, earnings_date: str, recommendation: Dict, 
+                         earnings_time: str = 'amc', rescan: bool = False) -> Dict:
+        """Create standardized scan data structure."""
+        scan_data = {
+            'ticker': symbol,
+            'earnings_date': earnings_date,
+            'earnings_time': earnings_time,
+            'recommendation_score': recommendation.get('score', 0),
+            'filters': recommendation.get('filters', {}),
+            'reasoning': recommendation.get('reasoning', ''),
+            'scanned_at': datetime.now(self.et_tz).isoformat()
+        }
+        if rescan:
+            scan_data['rescan'] = True
+        return scan_data
+
+    def _resolve_earnings_date(self, symbol: str, provided_date: str = None) -> Optional[str]:
+        """Resolve earnings date from multiple sources."""
+        if provided_date:
+            return provided_date
+        
+        # Try existing scan results
+        latest_scan = self.database.get_latest_scan_result(symbol)
+        if latest_scan and latest_scan.get('earnings_date'):
+            return latest_scan['earnings_date']
+        
+        # Try upcoming earnings
+        upcoming_earnings = self.earnings_scanner.get_earnings_for_scanning()
+        
+        symbol_earnings = [e for e in upcoming_earnings if e.get('symbol') == symbol]
+        return symbol_earnings[0].get('date', '') if symbol_earnings else None
+
     def daily_scan_job(self):
         """Perform daily earnings scan and filtering."""
         try:
             logger.info("Starting daily earnings scan...")
             
-            # Get upcoming earnings (next 2 days)
-            end_date = datetime.now() + timedelta(days=2)
-            
-            logger.info("Scanning for upcoming earnings...")
-            earnings_data = self.earnings_scanner.get_upcoming_earnings(
-                start_date=datetime.now(),
-                end_date=end_date
-            )
+            # Get earnings for scanning (AMC today / BMO tomorrow)
+            logger.info("Scanning for earnings for scanning...")
+            earnings_data = self.earnings_scanner.get_earnings_for_scanning()
             
             if not earnings_data:
                 logger.warning("No earnings data found for the next 2 days")
@@ -63,15 +90,12 @@ class ScanManager:
                         continue
                     
                     # Store scan result
-                    scan_data = {
-                        'ticker': symbol,
-                        'earnings_date': earning.get('date', ''),
-                        'earnings_time': earning.get('time', 'amc'),
-                        'recommendation_score': recommendation.get('score', 0),
-                        'filters': recommendation.get('filters', {}),
-                        'reasoning': recommendation.get('reasoning', ''),
-                        'scanned_at': datetime.now().isoformat()
-                    }
+                    scan_data = self._create_scan_data(
+                        symbol=symbol,
+                        earnings_date=earning.get('date', ''),
+                        recommendation=recommendation,
+                        earnings_time=earning.get('time', 'amc')
+                    )
                     
                     success = self.database.add_scan_result(scan_data)
                     if success:
@@ -116,21 +140,12 @@ class ScanManager:
                 try:
                     logger.info(f"Scanning {symbol}...")
                     
-                    # Get earnings data if not provided
+                    # Resolve earnings date
+                    earnings_date = self._resolve_earnings_date(symbol, earnings_date)
                     if not earnings_date:
-                        # Try to find upcoming earnings for this symbol
-                        upcoming_earnings = self.earnings_scanner.get_upcoming_earnings(
-                            start_date=datetime.now(),
-                            end_date=datetime.now() + timedelta(days=7)
-                        )
-                        
-                        symbol_earnings = [e for e in upcoming_earnings if e.get('symbol') == symbol]
-                        if not symbol_earnings:
-                            logger.warning(f"No upcoming earnings found for {symbol}")
-                            results['failed'].append({'symbol': symbol, 'reason': 'No upcoming earnings'})
-                            continue
-                        
-                        earnings_date = symbol_earnings[0].get('date', '')
+                        logger.warning(f"No upcoming earnings found for {symbol}")
+                        results['failed'].append({'symbol': symbol, 'reason': 'No upcoming earnings'})
+                        continue
                     
                     # Compute recommendation
                     recommendation = compute_recommendation(symbol)
@@ -141,15 +156,11 @@ class ScanManager:
                         continue
                     
                     # Store scan result
-                    scan_data = {
-                        'ticker': symbol,
-                        'earnings_date': earnings_date,
-                        'earnings_time': 'amc',  # Default
-                        'recommendation_score': recommendation.get('score', 0),
-                        'filters': recommendation.get('filters', {}),
-                        'reasoning': recommendation.get('reasoning', ''),
-                        'scanned_at': datetime.now().isoformat()
-                    }
+                    scan_data = self._create_scan_data(
+                        symbol=symbol,
+                        earnings_date=earnings_date,
+                        recommendation=recommendation
+                    )
                     
                     success = self.database.add_scan_result(scan_data)
                     if success:
@@ -180,26 +191,11 @@ class ScanManager:
         try:
             logger.info(f"Rescanning {symbol}...")
             
-            # Get earnings date if not provided
+            # Resolve earnings date
+            earnings_date = self._resolve_earnings_date(symbol, earnings_date)
             if not earnings_date:
-                # Try to get from existing scan results
-                latest_scan = self.database.get_latest_scan_result(symbol)
-                if latest_scan:
-                    earnings_date = latest_scan.get('earnings_date', '')
-                
-                if not earnings_date:
-                    # Try to find upcoming earnings
-                    upcoming_earnings = self.earnings_scanner.get_upcoming_earnings(
-                        start_date=datetime.now(),
-                        end_date=datetime.now() + timedelta(days=7)
-                    )
-                    
-                    symbol_earnings = [e for e in upcoming_earnings if e.get('symbol') == symbol]
-                    if symbol_earnings:
-                        earnings_date = symbol_earnings[0].get('date', '')
-                    else:
-                        logger.warning(f"No earnings date found for {symbol}")
-                        return None
+                logger.warning(f"No earnings date found for {symbol}")
+                return None
             
             # Compute fresh recommendation
             recommendation = compute_recommendation(symbol)
@@ -209,16 +205,12 @@ class ScanManager:
                 return None
             
             # Store updated scan result
-            scan_data = {
-                'ticker': symbol,
-                'earnings_date': earnings_date,
-                'earnings_time': 'amc',  # Default
-                'recommendation_score': recommendation.get('score', 0),
-                'filters': recommendation.get('filters', {}),
-                'reasoning': recommendation.get('reasoning', ''),
-                'scanned_at': datetime.now().isoformat(),
-                'rescan': True
-            }
+            scan_data = self._create_scan_data(
+                symbol=symbol,
+                earnings_date=earnings_date,
+                recommendation=recommendation,
+                rescan=True
+            )
             
             success = self.database.add_scan_result(scan_data)
             if success:
@@ -279,7 +271,7 @@ class ScanManager:
     def cleanup_old_scans(self, days_to_keep: int = 30) -> int:
         """Clean up old scan results."""
         try:
-            cutoff_date = datetime.now() - timedelta(days=days_to_keep)
+            cutoff_date = datetime.now(self.et_tz) - timedelta(days=days_to_keep)
             cleaned_count = self.database.cleanup_old_scan_results(cutoff_date)
             
             logger.info(f"Cleaned {cleaned_count} old scan results (older than {days_to_keep} days)")
@@ -292,14 +284,13 @@ class ScanManager:
     def get_earnings_calendar(self, days_ahead: int = 7) -> List[Dict]:
         """Get earnings calendar for the next N days."""
         try:
-            end_date = datetime.now() + timedelta(days=days_ahead)
-            
-            earnings_data = self.earnings_scanner.get_upcoming_earnings(
-                start_date=datetime.now(),
-                end_date=end_date
-            )
+            # Get earnings for scanning (AMC today / BMO tomorrow)
+            earnings_data = self.earnings_scanner.get_earnings_for_scanning()
             
             # Enhance with existing scan data
+            # Get trade selections once outside the loop for performance
+            selections = self.database.get_trade_selections()
+            
             enhanced_earnings = []
             for earning in earnings_data:
                 symbol = earning.get('symbol')
@@ -311,7 +302,6 @@ class ScanManager:
                         earning['last_scanned'] = latest_scan.get('scanned_at')
                     
                     # Check if selected
-                    selections = self.database.get_trade_selections()
                     is_selected = any(
                         s.get('ticker') == symbol and s.get('is_selected', False)
                         for s in selections

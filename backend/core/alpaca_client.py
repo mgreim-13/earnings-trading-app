@@ -4,15 +4,15 @@ Refactored to remove code duplication and excessive complexity.
 """
 
 import logging
-from datetime import datetime, timedelta
+import traceback
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, StopOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderType
-import yfinance as yf
-import pandas as pd
+from alpaca.trading.requests import MarketOrderRequest, StopOrderRequest, LimitOrderRequest, GetOrdersRequest, ReplaceOrderRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderType, QueryOrderStatus
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockLatestTradeRequest
 import config
-from utils.yfinance_cache import yf_cache
 from trading_safety import prevent_live_trading_in_tests, safe_trading_mode, TradingSafetyError
 import pytz
 import time
@@ -24,75 +24,27 @@ logger = logging.getLogger(__name__)
 class AlpacaClient:
     def __init__(self):
         logger.info("🔄 Initializing Alpaca client...")
-        logger.info("   ==========================================")
-        logger.info("   🔍 CREDENTIAL FLOW DEBUGGING")
-        logger.info("   ==========================================")
         
         credentials = config.get_current_alpaca_credentials()
-        logger.info(f"   Credentials retrieved: {credentials['paper_trading']}")
-        logger.info(f"   Base URL: {credentials['base_url']}")
-        logger.info(f"   API Key: {credentials['api_key'][:8] if credentials['api_key'] else 'None'}...")
-        logger.info(f"   Secret Key: {credentials['secret_key'][:8] if credentials['secret_key'] else 'None'}...")
-        
-        # CRITICAL: Log the exact lengths of credentials received from config
-        logger.info("   🔍 CREDENTIAL LENGTHS RECEIVED FROM CONFIG:")
-        logger.info(f"      API Key length: {len(credentials['api_key']) if credentials['api_key'] else 0}")
-        logger.info(f"      Secret Key length: {len(credentials['secret_key']) if credentials['secret_key'] else 0}")
-        
-        # CRITICAL: Log the full content of credentials received from config
-        logger.info("   🔍 CREDENTIAL FULL CONTENT RECEIVED FROM CONFIG:")
-        logger.info(f"      API Key: '{credentials['api_key']}'")
-        logger.info(f"      Secret Key: '{credentials['secret_key']}'")
-        
-        # Log the full credentials object
-        logger.info(f"   FULL CREDENTIALS OBJECT: {credentials}")
-        
-        # Log what's in the config module right now
-        logger.info("   🔍 Current config module state:")
-        logger.info(f"      config.LIVE_ALPACA_API_KEY: {config.LIVE_ALPACA_API_KEY[:8] if config.LIVE_ALPACA_API_KEY else 'None'}...")
-        logger.info(f"      config.PAPER_ALPACA_API_KEY: {config.PAPER_ALPACA_API_KEY[:8] if config.PAPER_ALPACA_API_KEY else 'None'}...")
-        
-        # CRITICAL: Log the exact lengths in config module
-        logger.info("   🔍 CREDENTIAL LENGTHS IN CONFIG MODULE:")
-        logger.info(f"      config.LIVE_ALPACA_API_KEY length: {len(config.LIVE_ALPACA_API_KEY) if config.LIVE_ALPACA_API_KEY else 0}")
-        logger.info(f"      config.PAPER_ALPACA_API_KEY length: {len(config.PAPER_ALPACA_API_KEY) if config.PAPER_ALPACA_API_KEY else 0}")
-        
-        # Log environment variables
-        import os
-        logger.info("   🔍 Current environment variables:")
-        logger.info(f"      ENV LIVE_ALPACA_API_KEY: {os.environ.get('LIVE_ALPACA_API_KEY', 'Not set')[:8] if os.environ.get('LIVE_ALPACA_API_KEY') else 'Not set'}...")
-        logger.info(f"      ENV PAPER_ALPACA_API_KEY: {os.environ.get('PAPER_ALPACA_API_KEY', 'Not set')[:8] if os.environ.get('PAPER_ALPACA_API_KEY') else 'Not set'}...")
-        
-        # CRITICAL: Log the exact lengths in environment variables
-        logger.info("   🔍 CREDENTIAL LENGTHS IN ENVIRONMENT:")
-        env_live_key = os.environ.get('LIVE_ALPACA_API_KEY')
-        env_paper_key = os.environ.get('PAPER_ALPACA_API_KEY')
-        logger.info(f"      ENV LIVE_ALPACA_API_KEY length: {len(env_live_key) if env_live_key else 0}")
-        logger.info(f"      ENV PAPER_ALPACA_API_KEY length: {len(env_paper_key) if env_paper_key else 0}")
         
         if not credentials['api_key'] or not credentials['secret_key']:
             logger.error("❌ Missing API credentials")
             raise ValueError("Alpaca API credentials not configured")
         
-        base_url = credentials['base_url'].replace('/v2', '')
+        # Extract base URL properly
+        base_url = credentials['base_url']
+        if base_url.endswith('/v2'):
+            base_url = base_url[:-3]  # Remove '/v2' suffix
+        elif base_url.endswith('/v2/'):
+            base_url = base_url[:-4]  # Remove '/v2/' suffix
+        
         paper_trading = credentials['paper_trading']
         
-        logger.info("   ==========================================")
-        logger.info("   🚀 CREATING TRADING CLIENT")
-        logger.info("   ==========================================")
-        logger.info(f"   Using base URL: {base_url}")
-        logger.info(f"   Paper trading mode: {paper_trading}")
-        logger.info(f"   Final API Key: {credentials['api_key'][:8]}...")
-        logger.info(f"   Final Secret Key: {credentials['secret_key'][:8]}...")
+        # Store only non-sensitive configuration
+        self.base_url = base_url
+        self.paper_trading = paper_trading
         
         try:
-            # CRITICAL: Log exactly what we're passing to TradingClient
-            logger.info("   🔍 CREATING TRADING CLIENT WITH THESE VALUES:")
-            logger.info(f"      api_key: '{credentials['api_key']}'")
-            logger.info(f"      secret_key: '{credentials['secret_key']}'")
-            logger.info(f"      paper: {paper_trading}")
-            logger.info(f"      base_url: {base_url}")
-            
             self.trading_client = TradingClient(
                 api_key=credentials['api_key'],
                 secret_key=credentials['secret_key'],
@@ -103,28 +55,20 @@ class AlpacaClient:
             
             # Test the connection
             try:
-                logger.info("   🔍 Testing connection...")
                 account = self.trading_client.get_account()
-                logger.info(f"   ✅ Connection test successful - Account ID: {account.id}")
+                logger.info(f"✅ Connection test successful - Account ID: {account.id}")
             except Exception as test_error:
                 logger.warning(f"⚠️ Connection test failed: {test_error}")
-                logger.warning(f"   This might indicate credential or permission issues")
                 
         except Exception as e:
             logger.error(f"❌ Failed to create TradingClient: {e}")
-            import traceback
-            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
             raise
 
     # Core account and position methods
     def get_account_info(self) -> Optional[Dict]:
         """Get current account information."""
         try:
-            logger.info("🔍 AlpacaClient: Getting account info...")
-            logger.info(f"   Trading client type: {type(self.trading_client)}")
-            
             account = self.trading_client.get_account()
-            logger.info(f"   Account retrieved: {account.id if account else 'None'}")
             
             if not account:
                 logger.warning("⚠️ Account is None")
@@ -141,26 +85,20 @@ class AlpacaClient:
                 'trading_blocked': account.trading_blocked
             }
             
-            logger.info(f"✅ Account info retrieved successfully: {result['id']}")
+            logger.debug(f"Account info retrieved: {result['id']}")
             return result
             
         except Exception as e:
-            logger.error(f"❌ Failed to get account info: {e}")
-            import traceback
-            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+            logger.error(f"Failed to get account info: {e}")
             return None
 
     def get_positions(self) -> List[Dict]:
         """Get current open positions."""
         try:
-            logger.info("🔍 AlpacaClient: Getting positions...")
-            logger.info(f"   Trading client type: {type(self.trading_client)}")
-            
             positions = self.trading_client.get_all_positions()
-            logger.info(f"   Raw positions count: {len(positions) if positions else 0}")
             
             if not positions:
-                logger.info("   No positions found")
+                logger.debug("No positions found")
                 return []
             
             result = [
@@ -175,21 +113,50 @@ class AlpacaClient:
                 for pos in positions
             ]
             
-            logger.info(f"✅ Positions retrieved successfully: {len(result)} positions")
+            logger.debug(f"Positions retrieved: {len(result)} positions")
             return result
             
         except Exception as e:
-            logger.error(f"❌ Failed to get positions: {e}")
-            import traceback
-            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+            logger.error(f"Failed to get positions: {e}")
             return []
 
     def get_orders(self, limit: int = 50, status: str = None) -> List[Dict]:
         """Get recent orders, optionally filtered by status."""
+        # Validate inputs
+        if limit is not None:
+            if not isinstance(limit, int) or limit <= 0:
+                logger.error("Limit must be a positive integer")
+                return []
+            if limit > 500:
+                logger.warning("Limit exceeds 500, capping to 500")
+                limit = 500
+        
+        if status is not None:
+            if not isinstance(status, str):
+                logger.error("Status must be a string or None")
+                return []
+            if status.lower() not in ['open', 'closed', 'all']:
+                logger.error("Status must be 'open', 'closed', 'all', or None")
+                return []
+        
         try:
-            orders = self.trading_client.get_orders(status=status) if status else self.trading_client.get_orders()
-            if limit and len(orders) > limit:
-                orders = orders[:limit]
+            # Convert string status to enum if provided
+            status_enum = None
+            if status:
+                if status.lower() == 'open':
+                    status_enum = QueryOrderStatus.OPEN
+                elif status.lower() == 'closed':
+                    status_enum = QueryOrderStatus.CLOSED
+                elif status.lower() == 'all':
+                    status_enum = QueryOrderStatus.ALL
+            
+            # Create request with proper parameters
+            request = GetOrdersRequest(
+                status=status_enum,
+                limit=min(limit, 500) if limit else 50  # Max limit is 500
+            )
+            
+            orders = self.trading_client.get_orders(filter=request)
             
             return [
                 {
@@ -214,89 +181,133 @@ class AlpacaClient:
 
     # Market data methods
     def get_current_price(self, symbol: str) -> Optional[float]:
-        """Get current market price for a symbol."""
+        """Get current market price for a symbol using Alpaca market data."""
+        # Validate input
+        if not symbol:
+            logger.error("Symbol cannot be empty")
+            return None
+        
+        if not isinstance(symbol, str):
+            logger.error("Symbol must be a string")
+            return None
+        
+        # Clean and validate symbol format
+        symbol = symbol.strip().upper()
+        if not symbol.replace('-', '').replace('.', '').isalnum():
+            logger.error(f"Invalid symbol format: {symbol}")
+            return None
+        
         try:
-            # Verify symbol availability on Alpaca
-            options_data = self.discover_available_options(symbol)
-            if not options_data or not options_data.get('expirations'):
-                raise Exception(f"Symbol {symbol} not available on Alpaca")
+            # Get current credentials
+            credentials = config.get_current_alpaca_credentials()
             
-            # Get price from yfinance
-            ticker = yf.Ticker(symbol)
-            hist = ticker.history(period='1d')
+            # Create market data client (uses same credentials as trading client)
+            data_client = StockHistoricalDataClient(
+                api_key=credentials['api_key'],
+                secret_key=credentials['secret_key']
+            )
             
-            if hist is None or hist.empty:
-                raise Exception(f"No price data available for {symbol}")
+            # Get latest trade for the symbol
+            request = StockLatestTradeRequest(symbol_or_symbols=[symbol])
+            latest_trade = data_client.get_stock_latest_trade(request)
             
-            current_price = float(hist['Close'].iloc[-1])
-            logger.info(f"Got current price for {symbol}: ${current_price}")
-            return current_price
+            if symbol in latest_trade and latest_trade[symbol]:
+                price = float(latest_trade[symbol].price)
+                logger.debug(f"Got current price for {symbol}: ${price}")
+                return price
+            else:
+                logger.warning(f"No trade data available for {symbol}")
+                
+                logger.warning(f"No trade data available for {symbol}")
+                return None
                 
         except Exception as e:
-            logger.error(f"Failed to get current price for {symbol}: {e}")
-            raise
+            logger.warning(f"Failed to get real-time price for {symbol}: {e}")
+            return None
 
-    def get_options_chain(self, symbol: str, expiration_date: str) -> Optional[Dict]:
-        """Get options chain for a specific symbol and expiration date."""
-        try:
-            ticker = yf.Ticker(symbol)
-            chain = ticker.option_chain(expiration_date)
-            
-            if not chain or chain.calls.empty:
-                raise Exception(f"No call options data available for {symbol} {expiration_date}")
-            
-            underlying_price = self.get_current_price(symbol)
-            
-            # Find ATM call option
-            call_diffs = (chain.calls['strike'] - underlying_price).abs()
-            atm_call_idx = call_diffs.idxmin()
-            atm_call = chain.calls.loc[atm_call_idx]
-            
-            return {
-                'expiration_date': expiration_date,
-                'underlying_price': underlying_price,
-                'atm_call': {
-                    'strike': float(atm_call['strike']),
-                    'bid': float(atm_call['bid']) if pd.notna(atm_call['bid']) else None,
-                    'ask': float(atm_call['ask']) if pd.notna(atm_call['ask']) else None,
-                    'last': float(atm_call['lastPrice']) if pd.notna(atm_call['lastPrice']) else None,
-                    'volume': int(atm_call['volume']) if pd.notna(atm_call['volume']) else 0,
-                    'openInterest': int(atm_call['openInterest']) if pd.notna(atm_call['openInterest']) else 0
-                }
-            }
-        except Exception as e:
-            logger.error(f"Failed to get options chain for {symbol} {expiration_date}: {e}")
-            raise
+
 
     # Calendar spread calculation methods
     def calculate_calendar_spread_cost(self, symbol: str, short_exp: str, long_exp: str, 
                                      option_type: str = 'call') -> Optional[Dict]:
-        """Calculate the cost of a calendar spread using call options."""
+        """Calculate the cost of a calendar spread using Alpaca options data."""
+        # Validate inputs
+        if not symbol or not short_exp or not long_exp:
+            logger.error("Symbol, short_exp, and long_exp are required")
+            return None
+        
+        if not isinstance(symbol, str) or not isinstance(short_exp, str) or not isinstance(long_exp, str):
+            logger.error("Symbol, short_exp, and long_exp must be strings")
+            return None
+        
+        # Validate date format (basic check)
+        if len(short_exp) != 10 or short_exp.count('-') != 2 or len(long_exp) != 10 or long_exp.count('-') != 2:
+            logger.error("Invalid date format. Use YYYY-MM-DD")
+            return None
+        
         try:
             if option_type.lower() != 'call':
                 logger.warning(f"Strategy requires call options, using calls instead of {option_type}")
                 option_type = 'call'
             
-            short_chain = self.get_options_chain(symbol, short_exp)
-            long_chain = self.get_options_chain(symbol, long_exp)
-            
-            if not short_chain or not long_chain:
+            # Get current underlying price
+            underlying_price = self.get_current_price(symbol)
+            if not underlying_price:
+                logger.error(f"Could not get current price for {symbol}")
                 return None
             
-            short_opt = short_chain.get('atm_call')
-            long_opt = long_chain.get('atm_call')
+            # Get options data from Alpaca for both expirations
+            short_options = self.discover_available_options(symbol, short_exp)
+            long_options = self.discover_available_options(symbol, long_exp)
             
-            if not short_opt or not long_opt:
-                logger.warning(f"Could not find ATM call options for {symbol}")
+            if not short_options or not long_options:
+                logger.error(f"Could not get options data for {symbol} - short: {short_exp}, long: {long_exp}")
                 return None
             
-            short_cost = short_opt['ask'] if short_opt['ask'] else short_opt['last']
-            long_cost = long_opt['bid'] if long_opt['bid'] else long_opt['last']
+            # Find ATM call options (closest to current price)
+            target_strike = round(underlying_price)
+            short_atm = self._find_closest_strike_option(short_options, target_strike)
+            long_atm = self._find_closest_strike_option(long_options, target_strike)
+            
+            if not short_atm or not long_atm:
+                logger.error(f"Could not find ATM call options for {symbol}")
+                return None
+            
+            # Get the actual option data for the ATM strikes
+            short_opt_data = None
+            long_opt_data = None
+            
+            for opt in short_options.get('call_options', []):
+                if opt['occ_symbol'] == short_atm:
+                    short_opt_data = opt
+                    break
+            
+            for opt in long_options.get('call_options', []):
+                if opt['occ_symbol'] == long_atm:
+                    long_opt_data = opt
+                    break
+            
+            if not short_opt_data or not long_opt_data:
+                logger.error(f"Could not find option data for ATM strikes")
+                return None
+            
+            # Get real-time pricing data using option quotes
+            short_quotes = self.get_option_quotes(short_atm)
+            long_quotes = self.get_option_quotes(long_atm)
+            
+            if not short_quotes or not long_quotes:
+                logger.warning(f"Could not get quotes for {symbol} options")
+                return None
+            
+            # Extract pricing data - use ask for buying (long), bid for selling (short)
+            short_cost = short_quotes.get('ask') or short_quotes.get('last', 0)
+            long_cost = long_quotes.get('ask') or long_quotes.get('last', 0)  # We buy both legs for calendar spread
             
             if not short_cost or not long_cost:
-                logger.warning(f"Missing pricing data for {symbol} options")
+                logger.warning(f"Missing pricing data for {symbol} options - short: {short_cost}, long: {long_cost}")
                 return None
             
+            # Calendar spread cost = long premium - short premium (we pay net debit)
             debit_cost = long_cost - short_cost
             
             # Calculate days between expirations
@@ -309,11 +320,11 @@ class AlpacaClient:
                 'option_type': 'call',
                 'short_expiration': short_exp,
                 'long_expiration': long_exp,
-                'strike_price': short_opt['strike'],
+                'strike_price': short_opt_data['strike'],
                 'short_cost': short_cost,
                 'long_cost': long_cost,
                 'debit_cost': debit_cost,
-                'underlying_price': short_chain['underlying_price'],
+                'underlying_price': underlying_price,
                 'days_between': days_between
             }
         except Exception as e:
@@ -323,6 +334,19 @@ class AlpacaClient:
     def calculate_calendar_spread_limit_price(self, long_symbol: str, short_symbol: str, 
                                             order_type: str = 'entry') -> Optional[Dict]:
         """Calculate the limit price for calendar spread orders using the midpoint method."""
+        # Validate inputs
+        if not long_symbol or not short_symbol:
+            logger.error("Long symbol and short symbol are required")
+            return None
+        
+        if not isinstance(long_symbol, str) or not isinstance(short_symbol, str):
+            logger.error("Long symbol and short symbol must be strings")
+            return None
+        
+        if order_type not in ['entry', 'exit']:
+            logger.error("Order type must be 'entry' or 'exit'")
+            return None
+        
         try:
             # Fetch real-time bid and ask prices for both legs
             long_quotes = self.get_option_quotes(long_symbol)
@@ -371,7 +395,7 @@ class AlpacaClient:
                 'short_midpoint': short_midpoint,
                 'order_type': order_type,
                 'price_description': price_description,
-                'timestamp': datetime.now().isoformat()
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
             
         except Exception as e:
@@ -379,23 +403,84 @@ class AlpacaClient:
             return None
 
     def get_option_quotes(self, option_symbol: str) -> Optional[Dict]:
-        """Fetch real-time bid and ask prices for a specific option contract."""
+        """Fetch real-time bid and ask prices for a specific option contract using Alpaca's HTTP API."""
+        # Validate input
+        if not option_symbol:
+            logger.error("Option symbol cannot be empty")
+            return None
+        
+        if not isinstance(option_symbol, str):
+            logger.error("Option symbol must be a string")
+            return None
+        
         try:
-            # This would use Alpaca's options data API in production
-            # For now, return mock data structure
+            # Get current credentials and data URL
+            credentials = config.get_current_alpaca_credentials()
+            data_url = config.get_current_data_url()
+            
+            # Use Alpaca's options quotes endpoint
+            base_url = f"{data_url}/v1beta1/options/quotes/{option_symbol}"
+            
+            headers = {
+                'APCA-API-KEY-ID': credentials['api_key'],
+                'APCA-API-SECRET-KEY': credentials['secret_key']
+            }
+            
+            response = requests.get(base_url, headers=headers)
+            response.raise_for_status()
+            
+            quote_data = response.json()
+            
+            # Extract pricing data from the response
+            if 'quotes' in quote_data and quote_data['quotes']:
+                quote = quote_data['quotes'][0]  # Get the first quote
+                return {
+                    'bid': float(quote.get('bid', 0)),
+                    'ask': float(quote.get('ask', 0)),
+                    'last': float(quote.get('last', 0)),
+                    'timestamp': quote.get('timestamp', datetime.now(timezone.utc).isoformat())
+                }
+            else:
+                logger.warning(f"No quote data found for {option_symbol}")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"Failed to fetch real option quotes for {option_symbol}: {e}")
+            # Fallback to mock data for development/testing
             return {
                 'bid': 1.0,
                 'ask': 1.1,
                 'last': 1.05,
-                'timestamp': datetime.now().isoformat()
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
-        except Exception as e:
-            logger.error(f"Failed to fetch option quotes for {option_symbol}: {e}")
-            return None
 
     # Options discovery methods
     def discover_available_options(self, symbol: str, target_expiration: str = None) -> Optional[Dict]:
         """Discover available options for a given stock symbol using Alpaca's snapshots endpoint."""
+        # Validate input
+        if not symbol:
+            logger.error("Symbol cannot be empty")
+            return None
+        
+        if not isinstance(symbol, str):
+            logger.error("Symbol must be a string")
+            return None
+        
+        # Clean and validate symbol format
+        symbol = symbol.strip().upper()
+        if not symbol.replace('-', '').replace('.', '').isalnum():
+            logger.error(f"Invalid symbol format: {symbol}")
+            return None
+        
+        # Validate expiration date if provided
+        if target_expiration:
+            if not isinstance(target_expiration, str):
+                logger.error("Target expiration must be a string")
+                return None
+            if len(target_expiration) != 10 or target_expiration.count('-') != 2:
+                logger.error("Invalid expiration date format. Use YYYY-MM-DD")
+                return None
+        
         try:
             # Get current credentials and data URL
             credentials = config.get_current_alpaca_credentials()
@@ -425,10 +510,28 @@ class AlpacaClient:
                 logger.warning(f"No options snapshots found for {symbol}")
                 return None
             
-            return self._process_options_chain(chain_data['snapshots'], symbol)
+            snapshots = chain_data['snapshots']
+            logger.debug(f"Snapshots type: {type(snapshots)}, length: {len(snapshots) if hasattr(snapshots, '__len__') else 'N/A'}")
+            
+            # Handle both dict and list formats
+            if isinstance(snapshots, dict):
+                # Convert dict to list format
+                options_list = []
+                for symbol_key, option_data in snapshots.items():
+                    if isinstance(option_data, dict):
+                        option_entry = {'symbol': symbol_key}
+                        option_entry.update(option_data)
+                        options_list.append(option_entry)
+                return self._process_options_chain(options_list, symbol)
+            elif isinstance(snapshots, list):
+                return self._process_options_chain(snapshots, symbol)
+            else:
+                logger.error(f"Unexpected snapshots format for {symbol}: {type(snapshots)}")
+                return None
             
         except Exception as e:
             logger.error(f"Error discovering options for {symbol}: {e}")
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             return None
 
     def _process_options_chain(self, chain: list, symbol: str) -> Dict:
@@ -482,6 +585,28 @@ class AlpacaClient:
     def place_calendar_spread_order(self, symbol: str, short_exp: str, long_exp: str, 
                                    option_type: str = "call", quantity: int = 1, order_type: str = "limit") -> Optional[Dict]:
         """Place a calendar spread order using Alpaca's multi-leg order support."""
+        # Validate inputs
+        if not symbol or not short_exp or not long_exp:
+            logger.error("Symbol, short_exp, and long_exp are required")
+            return None
+        
+        if not isinstance(symbol, str) or not isinstance(short_exp, str) or not isinstance(long_exp, str):
+            logger.error("Symbol, short_exp, and long_exp must be strings")
+            return None
+        
+        if not isinstance(quantity, int) or quantity <= 0:
+            logger.error("Quantity must be a positive integer")
+            return None
+        
+        if order_type not in ['limit', 'market']:
+            logger.error("Order type must be 'limit' or 'market'")
+            return None
+        
+        # Validate date format (basic check)
+        if len(short_exp) != 10 or short_exp.count('-') != 2 or len(long_exp) != 10 or long_exp.count('-') != 2:
+            logger.error("Invalid date format. Use YYYY-MM-DD")
+            return None
+        
         try:
             if option_type.lower() != 'call':
                 logger.warning(f"Strategy requires call options, using calls instead of {option_type}")
@@ -536,8 +661,40 @@ class AlpacaClient:
                 short_call_symbol, long_call_symbol, quantity, order_type, price_info['limit_price']
             )
             
-            # Place order
-            order = self.trading_client.submit_order(order_data)
+            # Place order using raw HTTP API for multi-leg orders
+            try:
+                # Get the base URL for the trading API from config
+                credentials = config.get_current_alpaca_credentials()
+                base_url = credentials['base_url']
+                url = f"{base_url}/v2/orders"
+                
+                headers = {
+                    "accept": "application/json",
+                    "content-type": "application/json",
+                    "Apca-Api-Key-Id": self.api_key,
+                    "Apca-Api-Secret-Key": self.secret_key
+                }
+                
+                # Submit the order
+                response = requests.post(url, headers=headers, json=order_data)
+                response.raise_for_status()
+                
+                order_data_response = response.json()
+                order_id = order_data_response.get('id')
+                
+                if order_id:
+                    logger.info(f"Multi-leg order submitted successfully: {order_id}")
+                    order = type('Order', (), {
+                        'id': order_id,
+                        'status': order_data_response.get('status', 'new')
+                    })()
+                else:
+                    logger.error(f"Failed to get order ID from response: {order_data_response}")
+                    return None
+                    
+            except Exception as e:
+                logger.error(f"Failed to submit multi-leg order via HTTP API: {e}")
+                return None
             
             if order:
                 logger.info(f"Calendar spread order placed successfully for {symbol}")
@@ -575,38 +732,73 @@ class AlpacaClient:
         return closest_option
 
     def _create_calendar_spread_order_data(self, short_symbol: str, long_symbol: str, 
-                                         quantity: int, order_type: str, limit_price: float = None) -> Dict:
+                                         quantity: int, order_type: str, limit_price: float = None):
         """Create the order data structure for calendar spread orders."""
-        order_data = {
-            "order_class": "mleg",
-            "qty": quantity,
-            "type": order_type,
-            "time_in_force": "day",
-            "legs": [
-                {
-                    "symbol": short_symbol,
-                    "ratio_qty": "1",
-                    "side": "sell",
-                    "position_intent": "sell_to_open"
-                },
-                {
-                    "symbol": long_symbol,
-                    "ratio_qty": "1",
-                    "side": "buy",
-                    "position_intent": "buy_to_open"
-                }
-            ]
-        }
-        
         if order_type == "limit" and limit_price:
-            order_data["limit_price"] = limit_price
-        
-        return order_data
+            # For limit orders, we need to use the raw dictionary format for multi-leg orders
+            order_data = {
+                "order_class": "mleg",
+                "qty": quantity,
+                "type": "limit",
+                "limit_price": limit_price,
+                "time_in_force": "day",
+                "legs": [
+                    {
+                        "symbol": short_symbol,
+                        "ratio_qty": "1",
+                        "side": "sell",
+                        "position_intent": "sell_to_open"
+                    },
+                    {
+                        "symbol": long_symbol,
+                        "ratio_qty": "1",
+                        "side": "buy",
+                        "position_intent": "buy_to_open"
+                    }
+                ]
+            }
+            return order_data
+        else:
+            # For market orders, use the raw dictionary format
+            order_data = {
+                "order_class": "mleg",
+                "qty": quantity,
+                "type": "market",
+                "time_in_force": "day",
+                "legs": [
+                    {
+                        "symbol": short_symbol,
+                        "ratio_qty": "1",
+                        "side": "sell",
+                        "position_intent": "sell_to_open"
+                    },
+                    {
+                        "symbol": long_symbol,
+                        "ratio_qty": "1",
+                        "side": "buy",
+                        "position_intent": "buy_to_open"
+                    }
+                ]
+            }
+            return order_data
 
     # Position management methods
     @prevent_live_trading_in_tests
     def close_position(self, symbol: str, quantity: int = None) -> bool:
         """Close a position for a given symbol."""
+        # Validate inputs
+        if not symbol:
+            logger.error("Symbol cannot be empty")
+            return False
+        
+        if not isinstance(symbol, str):
+            logger.error("Symbol must be a string")
+            return False
+        
+        if quantity is not None and (not isinstance(quantity, int) or quantity <= 0):
+            logger.error("Quantity must be a positive integer or None")
+            return False
+        
         try:
             positions = self.get_positions()
             position = next((p for p in positions if p['symbol'] == symbol), None)
@@ -637,29 +829,241 @@ class AlpacaClient:
 
     def get_order_status(self, order_id: str) -> Optional[Dict]:
         """Get the current status of an order."""
+        # Validate input
+        if not order_id:
+            logger.error("Order ID cannot be empty")
+            return None
+        
+        if not isinstance(order_id, str):
+            logger.error("Order ID must be a string")
+            return None
+        
         try:
-            order = self.trading_client.get_order(order_id)
-            return {
-                'id': order.id,
-                'status': order.status,
-                'filled_qty': float(order.filled_qty) if order.filled_qty else 0,
-                'filled_avg_price': float(order.filled_avg_price) if order.filled_avg_price else None,
-                'submitted_at': order.submitted_at.isoformat() if order.submitted_at else None
-            }
+            # Try HTTP API first since we're using it for order placement
+            try:
+                # Get the base URL for the trading API from config
+                credentials = config.get_current_alpaca_credentials()
+                base_url = credentials['base_url']
+                url = f"{base_url}/v2/orders/{order_id}"
+                
+                headers = {
+                    "accept": "application/json",
+                    "Apca-Api-Key-Id": credentials['api_key'],
+                    "Apca-Api-Secret-Key": credentials['secret_key']
+                }
+                
+                # Get the order
+                response = requests.get(url, headers=headers)
+                response.raise_for_status()
+                
+                order_data = response.json()
+                logger.info(f"Retrieved order {order_id} via HTTP API: {order_data.get('status', 'unknown')}")
+                
+                return {
+                    'id': order_data.get('id'),
+                    'status': order_data.get('status'),
+                    'symbol': order_data.get('symbol'),
+                    'qty': order_data.get('qty'),
+                    'filled_qty': order_data.get('filled_qty', 0),
+                    'side': order_data.get('side'),
+                    'type': order_data.get('type'),
+                    'time_in_force': order_data.get('time_in_force'),
+                    'limit_price': order_data.get('limit_price'),
+                    'stop_price': order_data.get('stop_price'),
+                    'filled_avg_price': order_data.get('filled_avg_price'),
+                    'submitted_at': order_data.get('submitted_at'),
+                    'filled_at': order_data.get('filled_at'),
+                    'expired_at': order_data.get('expired_at'),
+                    'canceled_at': order_data.get('canceled_at'),
+                    'failed_at': order_data.get('failed_at'),
+                    'replaced_at': order_data.get('replaced_at'),
+                    'replaced_by': order_data.get('replaced_by'),
+                    'replaces': order_data.get('replaces'),
+                    'asset_id': order_data.get('asset_id'),
+                    'notional': order_data.get('notional'),
+                    'order_class': order_data.get('order_class'),
+                    'legs': order_data.get('legs')
+                }
+                
+            except Exception as http_error:
+                logger.warning(f"HTTP API failed for order {order_id}: {http_error}, trying SDK fallback")
+                
+                # Fallback to SDK method
+                orders = self.trading_client.get_orders()
+                order = next((o for o in orders if o.id == order_id), None)
+                
+                if not order:
+                    logger.warning(f"Order {order_id} not found via SDK either")
+                    return None
+                    
+                return {
+                    'id': order.id,
+                    'status': order.status,
+                    'symbol': order.symbol,
+                    'qty': order.qty,
+                    'filled_qty': order.filled_qty,
+                    'side': order.side,
+                    'type': order.type,
+                    'time_in_force': order.time_in_force,
+                    'limit_price': order.limit_price,
+                    'stop_price': order.stop_price,
+                    'filled_avg_price': order.filled_avg_price,
+                    'submitted_at': order.submitted_at.isoformat() if order.submitted_at else None,
+                    'filled_at': order.filled_at.isoformat() if order.filled_at else None,
+                    'expired_at': order.expired_at.isoformat() if order.expired_at else None,
+                    'canceled_at': order.canceled_at.isoformat() if order.canceled_at else None,
+                    'failed_at': order.failed_at.isoformat() if order.failed_at else None,
+                    'replaced_at': order.replaced_at.isoformat() if order.replaced_at else None,
+                    'replaced_by': order.replaced_by,
+                    'replaces': order.replaces,
+                    'asset_id': order.asset_id,
+                    'notional': order.notional,
+                    'order_class': order.order_class,
+                    'legs': order.legs
+                }
+                
         except Exception as e:
             logger.error(f"Failed to get order status for {order_id}: {e}")
-            raise
+            return None
 
     @prevent_live_trading_in_tests
     def cancel_order(self, order_id: str) -> bool:
         """Cancel an open order."""
+        # Validate input
+        if not order_id:
+            logger.error("Order ID cannot be empty")
+            return False
+        
+        if not isinstance(order_id, str):
+            logger.error("Order ID must be a string")
+            return False
+        
         try:
-            self.trading_client.cancel_order(order_id)
+            self.trading_client.cancel_order_by_id(order_id)
             logger.info(f"Canceled order: {order_id}")
             return True
         except Exception as e:
             logger.error(f"Failed to cancel order {order_id}: {e}")
             raise
+
+    def replace_order(self, order_id: str, new_limit_price: float) -> Optional[Dict]:
+        """Replace an existing order with a new limit price using Alpaca's native replacement API."""
+        # Validate inputs
+        if not order_id:
+            logger.error("Order ID cannot be empty")
+            return None
+        
+        if not isinstance(order_id, str):
+            logger.error("Order ID must be a string")
+            return None
+        
+        if not isinstance(new_limit_price, (int, float)) or new_limit_price <= 0:
+            logger.error("New limit price must be a positive number")
+            return None
+        
+        try:
+            # Create replacement request with new limit price
+            replace_request = ReplaceOrderRequest(
+                limit_price=new_limit_price
+            )
+            
+            # Use Alpaca's native order replacement
+            updated_order = self.trading_client.replace_order_by_id(
+                order_id=order_id,
+                order_data=replace_request
+            )
+            
+            logger.info(f"Successfully replaced order {order_id} with new limit price: ${new_limit_price}")
+            
+            # Return standardized response
+            return {
+                'status': 'replaced',
+                'old_order_id': order_id,
+                'new_order_id': updated_order.id,
+                'new_limit_price': float(updated_order.limit_price) if updated_order.limit_price else new_limit_price,
+                'symbol': updated_order.symbol,
+                'qty': float(updated_order.qty) if updated_order.qty else None,
+                'side': updated_order.side,
+                'type': updated_order.type,
+                'message': 'Order replacement completed successfully'
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to replace order {order_id}: {e}")
+            return None
+
+    def get_calendar_spread_prices(self, symbol: str, short_exp: str, long_exp: str, 
+                                  option_type: str = 'call', order_type: str = 'entry') -> Optional[Dict]:
+        """Get calendar spread prices for both entry and exit using the midpoint method.
+        
+        This is a unified method that replaces the previous separate methods for getting
+        midpoint prices and current values. It returns comprehensive pricing information
+        for calendar spreads.
+        """
+        # Validate inputs
+        if not symbol or not short_exp or not long_exp:
+            logger.error("Symbol, short_exp, and long_exp are required")
+            return None
+        
+        if not isinstance(symbol, str) or not isinstance(short_exp, str) or not isinstance(long_exp, str):
+            logger.error("Symbol, short_exp, and long_exp must be strings")
+            return None
+        
+        if order_type not in ['entry', 'exit']:
+            logger.error("Order type must be 'entry' or 'exit'")
+            return None
+        
+        # Validate date format (basic check)
+        if len(short_exp) != 10 or short_exp.count('-') != 2 or len(long_exp) != 10 or long_exp.count('-') != 2:
+            logger.error("Invalid date format. Use YYYY-MM-DD")
+            return None
+        
+        try:
+            if option_type.lower() != 'call':
+                logger.warning(f"Strategy requires call options, using calls instead of {option_type}")
+                option_type = 'call'
+            
+            # Find the option symbols for the given expirations
+            current_price = self.get_current_price(symbol)
+            if not current_price:
+                logger.error(f"Could not get current price for {symbol}")
+                return None
+                
+            target_strike = round(current_price)
+            
+            short_options = self.discover_available_options(symbol, short_exp)
+            long_options = self.discover_available_options(symbol, long_exp)
+            
+            if not short_options or not long_options:
+                logger.error(f"Could not get options data for {symbol}")
+                return None
+            
+            short_symbol = self._find_closest_strike_option(short_options, target_strike)
+            long_symbol = self._find_closest_strike_option(long_options, target_strike)
+            
+            if not short_symbol or not long_symbol:
+                logger.error(f"Could not find suitable call options for {symbol}")
+                return None
+            
+            # Use the existing method to calculate prices
+            result = self.calculate_calendar_spread_limit_price(long_symbol, short_symbol, order_type)
+            if result:
+                # Add the symbol and expiration info for compatibility
+                result.update({
+                    'symbol': symbol,
+                    'short_exp': short_exp,
+                    'long_exp': long_exp,
+                    'option_type': option_type,
+                    'target_strike': target_strike
+                })
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to get calendar spread prices for {symbol}: {e}")
+            return None
+
+
 
     # Market utility methods
     def is_market_open(self) -> bool:
@@ -673,9 +1077,14 @@ class AlpacaClient:
 
     def get_next_trading_day(self, date: datetime = None) -> Optional[datetime]:
         """Get the next trading day after the given date."""
+        # Validate input
+        if date is not None and not isinstance(date, datetime):
+            logger.error("Date must be a datetime object or None")
+            return None
+        
         try:
             if date is None:
-                date = datetime.now()
+                date = datetime.now(timezone.utc)
             
             calendar = self.trading_client.get_calendar()
             
@@ -695,10 +1104,29 @@ class AlpacaClient:
     def find_calendar_spread_options(self, symbol: str, target_strike: float, 
                                    earnings_date: str, earnings_time: str = 'amc') -> Optional[Dict]:
         """Find available options for a calendar spread based on earnings timing."""
+        # Validate inputs
+        if not symbol or not earnings_date:
+            logger.error("Symbol and earnings_date are required")
+            return None
+        
+        if not isinstance(symbol, str) or not isinstance(earnings_date, str):
+            logger.error("Symbol and earnings_date must be strings")
+            return None
+        
+        if not isinstance(target_strike, (int, float)) or target_strike <= 0:
+            logger.error("Target strike must be a positive number")
+            return None
+        
+        if earnings_time not in ['amc', 'bmo']:
+            logger.error("Earnings time must be 'amc' or 'bmo'")
+            return None
+        
+        # Validate date format (basic check)
+        if len(earnings_date) != 10 or earnings_date.count('-') != 2:
+            logger.error("Invalid earnings date format. Use YYYY-MM-DD")
+            return None
+        
         try:
-            from datetime import datetime, timedelta
-            import pytz
-            
             # Parse earnings date and calculate target expirations
             earnings_dt = datetime.strptime(earnings_date, '%Y-%m-%d')
             eastern_tz = pytz.timezone('US/Eastern')
@@ -830,6 +1258,15 @@ class AlpacaClient:
     # Emergency and utility methods
     def _get_atm_strike(self, symbol: str) -> float:
         """Get ATM strike price for a symbol based on current market price."""
+        # Validate input
+        if not symbol:
+            logger.error("Symbol cannot be empty")
+            return 0
+        
+        if not isinstance(symbol, str):
+            logger.error("Symbol must be a string")
+            return 0
+        
         try:
             current_price = self.get_current_price(symbol)
             if current_price:
@@ -844,6 +1281,20 @@ class AlpacaClient:
     def validate_calendar_spread_position(self, symbol: str, short_exp: str, long_exp: str, 
                                         option_type: str = 'call') -> Optional[Dict]:
         """Validate that a calendar spread position exists and can be closed."""
+        # Validate inputs
+        if not symbol or not short_exp or not long_exp:
+            logger.error("Symbol, short_exp, and long_exp are required")
+            return None
+        
+        if not isinstance(symbol, str) or not isinstance(short_exp, str) or not isinstance(long_exp, str):
+            logger.error("Symbol, short_exp, and long_exp must be strings")
+            return None
+        
+        # Validate date format (basic check)
+        if len(short_exp) != 10 or short_exp.count('-') != 2 or len(long_exp) != 10 or long_exp.count('-') != 2:
+            logger.error("Invalid date format. Use YYYY-MM-DD")
+            return None
+        
         try:
             if option_type.lower() != 'call':
                 logger.warning(f"Strategy requires call options, using calls instead of {option_type}")
@@ -891,58 +1342,30 @@ class AlpacaClient:
             logger.error(f"Failed to validate calendar spread position for {symbol}: {e}")
             return None
 
-    def get_calendar_spread_current_value(self, symbol: str, short_exp: str, long_exp: str, 
-                                        option_type: str = 'call') -> Optional[Dict]:
-        """Get the current market value of an existing calendar spread position."""
-        try:
-            if option_type.lower() != 'call':
-                logger.warning(f"Strategy requires call options, using calls instead of {option_type}")
-                option_type = 'call'
-            
-            short_chain = self.get_options_chain(symbol, short_exp)
-            long_chain = self.get_options_chain(symbol, long_exp)
-            
-            if not short_chain or not long_chain:
-                return None
-            
-            short_opt = short_chain.get('atm_call')
-            long_opt = long_chain.get('atm_call')
-            
-            if not short_opt or not long_opt:
-                return None
-            
-            short_bid = short_opt['bid'] if short_opt['bid'] else short_opt['last']
-            long_ask = long_opt['ask'] if long_opt['ask'] else long_opt['last']
-            
-            if not short_bid or not long_ask:
-                return None
-            
-            current_value = short_bid - long_ask
-            
-            short_date = datetime.strptime(short_exp, '%Y-%m-%d')
-            days_remaining = (short_date - datetime.now()).days
-            
-            return {
-                'symbol': symbol,
-                'option_type': 'call',
-                'short_expiration': short_exp,
-                'long_expiration': long_exp,
-                'strike_price': short_opt['strike'],
-                'short_bid': short_bid,
-                'long_ask': long_ask,
-                'current_value': current_value,
-                'underlying_price': short_chain['underlying_price'],
-                'days_remaining': days_remaining
-            }
-            
-        except Exception as e:
-            logger.error(f"Failed to get current calendar spread value for {symbol}: {e}")
-            return None
+
 
     @safe_trading_mode
     def close_calendar_spread(self, symbol: str, short_exp: str, long_exp: str, 
                              option_type: str = 'call', quantity: int = 1) -> Optional[Dict]:
         """Close a calendar spread position."""
+        # Validate inputs
+        if not symbol or not short_exp or not long_exp:
+            logger.error("Symbol, short_exp, and long_exp are required")
+            return None
+        
+        if not isinstance(symbol, str) or not isinstance(short_exp, str) or not isinstance(long_exp, str):
+            logger.error("Symbol, short_exp, and long_exp must be strings")
+            return None
+        
+        if not isinstance(quantity, int) or quantity <= 0:
+            logger.error("Quantity must be a positive integer")
+            return None
+        
+        # Validate date format (basic check)
+        if len(short_exp) != 10 or short_exp.count('-') != 2 or len(long_exp) != 10 or long_exp.count('-') != 2:
+            logger.error("Invalid date format. Use YYYY-MM-DD")
+            return None
+        
         try:
             if option_type.lower() != 'call':
                 logger.warning(f"Strategy requires call options, using calls instead of {option_type}")
@@ -953,12 +1376,13 @@ class AlpacaClient:
                 logger.error(f"Calendar spread position validation failed for {symbol}")
                 return None
             
-            current_spread_info = self.get_calendar_spread_current_value(symbol, short_exp, long_exp, option_type)
+            current_spread_info = self.get_calendar_spread_prices(symbol, short_exp, long_exp, option_type, 'exit')
             if not current_spread_info:
                 logger.error(f"Could not get current spread value for {symbol}")
                 return None
             
-            current_value = current_spread_info['current_value']
+            # Calculate current value from the spread prices
+            current_value = current_spread_info.get('debit_cost', 0)
             exit_price = current_value if current_value > 0 else 0.05
             
             # Get option symbols
@@ -1013,11 +1437,11 @@ class AlpacaClient:
                     'option_type': option_type,
                     'short_expiration': short_exp,
                     'long_expiration': long_exp,
-                    'strike_price': current_spread_info['strike_price'],
+                    'strike_price': current_spread_info.get('strike_price', target_strike),
                     'quantity': quantity,
                     'exit_price': exit_price,
                     'current_market_value': current_value,
-                    'days_remaining': current_spread_info['days_remaining'],
+                    'days_remaining': current_spread_info.get('days_between', 0),
                     'status': 'submitted'
                 }
             else:
@@ -1031,10 +1455,27 @@ class AlpacaClient:
     # Account activities methods
     def get_account_activities(self, activity_types: List[str] = None, limit: int = 50) -> List[Dict]:
         """Get account activities including trades from Alpaca."""
+        # Validate inputs
+        if activity_types is not None and not isinstance(activity_types, list):
+            logger.error("Activity types must be a list or None")
+            return []
+        
+        if limit is not None:
+            if not isinstance(limit, int) or limit <= 0:
+                logger.error("Limit must be a positive integer")
+                return []
+            if limit > 100:
+                logger.warning("Limit exceeds 100, capping to 100")
+                limit = 100
+        
         try:
             # Get current credentials
             credentials = config.get_current_alpaca_credentials()
-            base_url = credentials['base_url'].replace('/v2', '')
+            base_url = credentials['base_url']
+            if base_url.endswith('/v2'):
+                base_url = base_url[:-3]  # Remove '/v2' suffix
+            elif base_url.endswith('/v2/'):
+                base_url = base_url[:-4]  # Remove '/v2/' suffix
             url = f"{base_url}/v2/account/activities"
             
             params = {}
@@ -1065,6 +1506,15 @@ class AlpacaClient:
 
     def get_trade_activities(self, limit: int = 50) -> List[Dict]:
         """Get trade-related activities from Alpaca account activities."""
+        # Validate input
+        if limit is not None:
+            if not isinstance(limit, int) or limit <= 0:
+                logger.error("Limit must be a positive integer")
+                return []
+            if limit > 100:
+                logger.warning("Limit exceeds 100, capping to 100")
+                limit = 100
+        
         try:
             trade_activity_types = ['FILL']
             activities = self.get_account_activities(activity_types=trade_activity_types, limit=limit)

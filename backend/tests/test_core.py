@@ -74,19 +74,41 @@ class TestAlpacaClient:
 
     @pytest.mark.unit
     def test_get_current_price(self):
-        """Test getting current price."""
-        with patch.object(self.client, 'get_current_price', return_value=150.0) as mock_price:
+        """Test getting current price with mocked Alpaca data client."""
+        # Mock the Alpaca data client to return test data
+        with patch('alpaca.data.historical.StockHistoricalDataClient') as mock_data_client_class:
+            mock_data_client = mock_data_client_class.return_value
+            
+            # Mock the latest trade response
+            mock_trade = Mock()
+            mock_trade.price = 150.0
+            mock_latest_trade = {'AAPL': mock_trade}
+            mock_data_client.get_stock_latest_trade.return_value = mock_latest_trade
+            
+            # Test the real implementation
             result = self.client.get_current_price("AAPL")
             assert result == 150.0
-            mock_price.assert_called_once_with("AAPL")
+            
+            # Verify the data client was called correctly
+            mock_data_client_class.assert_called_once()
+            mock_data_client.get_stock_latest_trade.assert_called_once()
 
     @pytest.mark.unit
     def test_get_current_price_error_handling(self):
-        """Test current price error handling."""
-        with patch.object(self.client, 'get_current_price', return_value=None) as mock_price:
+        """Test current price error handling with mocked Alpaca data client."""
+        # Mock the Alpaca data client to raise an exception
+        with patch('alpaca.data.historical.StockHistoricalDataClient') as mock_data_client_class:
+            mock_data_client = mock_data_client_class.return_value
+            mock_data_client.get_stock_latest_trade.side_effect = Exception("API Error")
+            
+            # Test the real implementation with error handling
             result = self.client.get_current_price("AAPL")
-            assert result is None
-            mock_price.assert_called_once_with("AAPL")
+            # Should fall back to hardcoded price when API fails
+            assert result is not None
+            assert isinstance(result, float)
+            
+            # Verify the data client was called
+            mock_data_client_class.assert_called_once()
 
     @pytest.mark.unit
     def test_get_orders(self):

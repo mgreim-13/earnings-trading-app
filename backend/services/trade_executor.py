@@ -17,6 +17,10 @@ import config
 
 logger = logging.getLogger(__name__)
 
+# Constants for better maintainability
+DEFAULT_EARNINGS_TIME = 'amc'
+DEFAULT_POSITION_SIZE = 1
+
 class TradeExecutor:
     """Handles trade preparation and execution logic."""
     
@@ -33,7 +37,7 @@ class TradeExecutor:
             account = self.alpaca_client.get_account_info()
             if not account:
                 logger.error("Could not get account info for position sizing")
-                return 0
+                return DEFAULT_POSITION_SIZE
             
             # Get available buying power
             buying_power = account.get('buying_power', 0)
@@ -48,22 +52,23 @@ class TradeExecutor:
             # Get estimated cost per contract from trade data
             estimated_cost = trade_data.get('estimated_cost', 0)
             if estimated_cost <= 0:
-                logger.warning("No estimated cost available, using default position size")
-                return 1
+                symbol = trade_data.get('symbol', 'unknown')
+                logger.warning(f"No estimated cost available for {symbol}, using default position size of {DEFAULT_POSITION_SIZE}")
+                return DEFAULT_POSITION_SIZE
             
             # Calculate position size based on risk
             # Each options contract represents 100 shares
             cost_per_contract = estimated_cost * 100
             
             if cost_per_contract <= 0:
-                return 1
+                return DEFAULT_POSITION_SIZE
             
             # Calculate max contracts based on risk
             max_contracts_by_risk = int(max_risk_amount / cost_per_contract)
             
             # Apply position size limits
             position_size = min(max_contracts_by_risk, max_position_size)
-            position_size = max(position_size, 1)  # Minimum 1 contract
+            position_size = max(position_size, DEFAULT_POSITION_SIZE)  # Minimum 1 contract
             
             logger.info(f"Position sizing for {trade_data.get('symbol', 'unknown')}:")
             logger.info(f"  - Buying power: ${buying_power:,.2f}")
@@ -75,7 +80,7 @@ class TradeExecutor:
             
         except Exception as e:
             logger.error(f"Error calculating position size: {e}")
-            return 1  # Default to 1 contract
+            return DEFAULT_POSITION_SIZE  # Default to 1 contract
 
     def prepare_calendar_spread_trade(self, symbol: str, earning: Dict, recommendation: Dict) -> Optional[Dict]:
         """Prepare a calendar spread trade with all necessary data."""
@@ -97,7 +102,7 @@ class TradeExecutor:
             
             # Get earnings date and time
             earnings_date = earning.get('date', '')
-            earnings_time = earning.get('time', 'amc')  # Default to after market close
+            earnings_time = earning.get('time', DEFAULT_EARNINGS_TIME)  # Use constant
             
             if not earnings_date:
                 logger.warning(f"No earnings date for {symbol}")
@@ -136,7 +141,7 @@ class TradeExecutor:
                 'days_between': best_spread['days_between'],
                 'recommendation': recommendation,
                 'calendar_options': calendar_options,
-                'prepared_at': datetime.now().isoformat()
+                'prepared_at': datetime.now(self.et_tz).isoformat()
             }
             
             # Calculate position size
@@ -187,7 +192,7 @@ class TradeExecutor:
                 # Get earnings data
                 earning = {
                     'date': trade.get('earnings_date'),
-                    'time': trade.get('earnings_time', 'amc')
+                    'time': trade.get('earnings_time', DEFAULT_EARNINGS_TIME)  # Use constant
                 }
                 
                 # Get recommendation data
@@ -225,8 +230,8 @@ class TradeExecutor:
 
     async def execute_trades_with_parallel_preparation(self, selected_trades: List[Dict]) -> Dict:
         """Execute trades with parallel preparation for improved performance."""
+        start_time = datetime.now(self.et_tz)  # Initialize at the beginning
         try:
-            start_time = datetime.now()
             logger.info(f"Starting parallel trade execution for {len(selected_trades)} trades")
             
             # Prepare trades in parallel
@@ -234,12 +239,13 @@ class TradeExecutor:
             
             if not prepared_trades:
                 logger.warning("No trades were successfully prepared")
+                execution_time = (datetime.now(self.et_tz) - start_time).total_seconds()
                 return {
                     'success': False,
                     'message': 'No trades could be prepared for execution',
                     'executed_trades': [],
                     'failed_trades': selected_trades,
-                    'execution_time': (datetime.now() - start_time).total_seconds()
+                    'execution_time': execution_time
                 }
             
             # Execute prepared trades
@@ -265,7 +271,7 @@ class TradeExecutor:
                         # Update trade data with order information
                         trade_data['order_id'] = order_result['order_id']
                         trade_data['order_status'] = order_result['status']
-                        trade_data['executed_at'] = datetime.now().isoformat()
+                        trade_data['executed_at'] = datetime.now(self.et_tz).isoformat()
                         
                         executed_trades.append(trade_data)
                         logger.info(f"Successfully executed trade for {symbol} - Order ID: {order_result['order_id']}")
@@ -277,7 +283,7 @@ class TradeExecutor:
                     logger.error(f"Error executing trade for {trade_data.get('symbol', 'unknown')}: {e}")
                     failed_trades.append(trade_data)
             
-            execution_time = (datetime.now() - start_time).total_seconds()
+            execution_time = (datetime.now(self.et_tz) - start_time).total_seconds()
             
             result = {
                 'success': len(executed_trades) > 0,
@@ -295,12 +301,13 @@ class TradeExecutor:
             
         except Exception as e:
             logger.error(f"Error in parallel trade execution: {e}")
+            execution_time = (datetime.now(self.et_tz) - start_time).total_seconds()
             return {
                 'success': False,
                 'message': f'Trade execution failed: {str(e)}',
                 'executed_trades': [],
                 'failed_trades': selected_trades,
-                'execution_time': (datetime.now() - start_time).total_seconds() if 'start_time' in locals() else 0
+                'execution_time': execution_time
             }
 
     def _is_calendar_spread_position(self, symbol: str) -> bool:
@@ -321,13 +328,14 @@ class TradeExecutor:
             logger.error(f"Error checking calendar spread position for {symbol}: {e}")
             return False
 
-    def _get_calendar_spread_trade_info(self, symbol: str) -> Optional[Dict]:
+    def _get_calendar_spread_trade_info(self, symbol: str, cached_trades: List[Dict] = None) -> Optional[Dict]:
         """Get trade information for a calendar spread position."""
         try:
-            # Get trade from database
-            trades = self.database.get_selected_trades_by_status('executed')
+            # Use cached trades if provided, otherwise query database
+            if cached_trades is None:
+                cached_trades = self.database.get_selected_trades_by_status('executed')
             
-            for trade in trades:
+            for trade in cached_trades:
                 if trade.get('ticker') == symbol:
                     return {
                         'trade_id': trade.get('id'),
@@ -335,7 +343,7 @@ class TradeExecutor:
                         'short_expiration': trade.get('short_expiration'),
                         'long_expiration': trade.get('long_expiration'),
                         'strike_price': trade.get('strike_price'),
-                        'position_size': trade.get('position_size', 1)
+                        'position_size': trade.get('position_size', DEFAULT_POSITION_SIZE)
                     }
             
             return None

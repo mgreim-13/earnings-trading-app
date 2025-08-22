@@ -3,7 +3,9 @@ Data Management Module
 Handles data cleanup, maintenance, and market protection operations.
 """
 
+import json
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import Dict, List
 import pytz
@@ -28,7 +30,7 @@ class DataManager:
             
             # Define cleanup parameters
             cleanup_days = 30  # Keep data for 30 days
-            cutoff_date = datetime.now() - timedelta(days=cleanup_days)
+            cutoff_date = datetime.now(self.et_tz) - timedelta(days=cleanup_days)
             
             cleanup_results = {
                 'scan_results': 0,
@@ -55,7 +57,7 @@ class DataManager:
             
             # Clean old trade selections (completed/cancelled trades older than 7 days)
             try:
-                selection_cutoff = datetime.now() - timedelta(days=7)
+                selection_cutoff = datetime.now(self.et_tz) - timedelta(days=7)
                 selection_count = self._cleanup_old_trade_selections(selection_cutoff)
                 cleanup_results['old_selections'] = selection_count
                 logger.info(f"Cleaned {selection_count} old trade selections")
@@ -198,7 +200,7 @@ class DataManager:
         """Store cleanup statistics in database."""
         try:
             stats_data = {
-                'cleanup_date': datetime.now().isoformat(),
+                'cleanup_date': datetime.now(self.et_tz).isoformat(),
                 'scan_results_cleaned': cleanup_results['scan_results'],
                 'trade_history_cleaned': cleanup_results['trade_history'],
                 'selections_cleaned': cleanup_results['old_selections'],
@@ -206,7 +208,6 @@ class DataManager:
             }
             
             # Store as a setting for now (could be expanded to dedicated table)
-            import json
             self.database.set_setting('last_cleanup_stats', json.dumps(stats_data))
             
         except Exception as e:
@@ -215,7 +216,6 @@ class DataManager:
     def get_cleanup_stats(self) -> Dict:
         """Get the latest cleanup statistics."""
         try:
-            import json
             stats_json = self.database.get_setting('last_cleanup_stats')
             
             if stats_json:
@@ -238,7 +238,7 @@ class DataManager:
         try:
             logger.info(f"Starting forced cleanup (keeping {days_to_keep} days of data)...")
             
-            cutoff_date = datetime.now() - timedelta(days=days_to_keep)
+            cutoff_date = datetime.now(self.et_tz) - timedelta(days=days_to_keep)
             
             cleanup_results = {
                 'scan_results': 0,
@@ -258,7 +258,7 @@ class DataManager:
             cleanup_results['trade_history'] = trade_count
             
             # Clean old selections
-            selection_cutoff = datetime.now() - timedelta(days=min(days_to_keep, 7))
+            selection_cutoff = datetime.now(self.et_tz) - timedelta(days=min(days_to_keep, 7))
             selection_count = self._cleanup_old_trade_selections(selection_cutoff)
             cleanup_results['old_selections'] = selection_count
             
@@ -304,7 +304,6 @@ class DataManager:
             
             # Get database file size (if SQLite)
             try:
-                import os
                 db_path = getattr(self.database, 'db_path', 'trading_app.db')
                 if os.path.exists(db_path):
                     stats['database_size'] = os.path.getsize(db_path)
@@ -332,7 +331,6 @@ class DataManager:
             
             # Get initial size
             try:
-                import os
                 db_path = getattr(self.database, 'db_path', 'trading_app.db')
                 if os.path.exists(db_path):
                     optimization_results['size_before'] = os.path.getsize(db_path)
@@ -341,29 +339,22 @@ class DataManager:
             
             # Run VACUUM to reclaim space (SQLite specific)
             try:
-                if hasattr(self.database, 'connection'):
-                    cursor = self.database.connection.cursor()
-                    cursor.execute("VACUUM")
-                    self.database.connection.commit()
-                    optimization_results['vacuum_completed'] = True
-                    logger.info("Database VACUUM completed")
+                if hasattr(self.database, 'optimize_database'):
+                    # Use the database's built-in optimization method
+                    opt_result = self.database.optimize_database()
+                    if opt_result.get('vacuum'):
+                        optimization_results['vacuum_completed'] = True
+                        logger.info("Database VACUUM completed")
+                    if opt_result.get('analyze'):
+                        optimization_results['indexes_analyzed'] = True
+                        logger.info("Database ANALYZE completed")
+                else:
+                    logger.warning("Database optimization method not available")
             except Exception as e:
-                logger.warning(f"VACUUM operation failed: {e}")
-            
-            # Analyze indexes for better query performance
-            try:
-                if hasattr(self.database, 'connection'):
-                    cursor = self.database.connection.cursor()
-                    cursor.execute("ANALYZE")
-                    self.database.connection.commit()
-                    optimization_results['indexes_analyzed'] = True
-                    logger.info("Database ANALYZE completed")
-            except Exception as e:
-                logger.warning(f"ANALYZE operation failed: {e}")
+                logger.warning(f"Database optimization failed: {e}")
             
             # Get final size
             try:
-                import os
                 db_path = getattr(self.database, 'db_path', 'trading_app.db')
                 if os.path.exists(db_path):
                     optimization_results['size_after'] = os.path.getsize(db_path)

@@ -34,8 +34,9 @@ def prevent_live_trading_in_tests(func: Callable) -> Callable:
                 logger.error(f"❌ {error_msg}")
                 raise TradingSafetyError(error_msg)
             
-            # If live trading is not allowed, block regardless of mode
-            if not config.LIVE_TRADING_ALLOWED:
+            # If live trading is not allowed, block only for live trading mode
+            current_creds = config.get_current_alpaca_credentials()
+            if not current_creds['paper_trading'] and not config.LIVE_TRADING_ALLOWED:
                 error_msg = f"LIVE TRADING BLOCKED: {func.__name__} cannot execute live trades (LIVE_TRADING_ALLOWED=false)"
                 logger.error(f"❌ {error_msg}")
                 raise TradingSafetyError(error_msg)
@@ -47,8 +48,9 @@ def prevent_live_trading_in_tests(func: Callable) -> Callable:
             logger.error(f"❌ {error_msg}")
             raise TradingSafetyError(error_msg)
         
-        # Check if live trading is not allowed
-        if not config.LIVE_TRADING_ALLOWED:
+        # Check if live trading is not allowed (only for live trading mode)
+        current_creds = config.get_current_alpaca_credentials()
+        if not current_creds['paper_trading'] and not config.LIVE_TRADING_ALLOWED:
             error_msg = f"LIVE TRADING BLOCKED: {func.__name__} cannot execute live trades (LIVE_TRADING_ALLOWED=false)"
             logger.error(f"❌ {error_msg}")
             raise TradingSafetyError(error_msg)

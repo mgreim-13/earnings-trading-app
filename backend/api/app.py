@@ -9,8 +9,10 @@ financial advisor before making investment decisions.
 """
 
 import logging
-from datetime import datetime
+import traceback
+from datetime import datetime, timedelta, timezone
 import numpy as np
+import pytz
 # Removed: Path import - no longer needed for .env file updates
 from typing import List, Dict, Optional, Any
 from fastapi import FastAPI, HTTPException, Request
@@ -218,7 +220,7 @@ async def health_check():
     """Health check endpoint."""
     return {
         "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
         "version": "1.0.0"
     }
 
@@ -227,17 +229,16 @@ async def health_check():
 async def config_test():
     """Test endpoint to verify configuration loading."""
     try:
-        import config
         # Get current credentials
         current_creds = config.get_current_alpaca_credentials()
         
         return {
             "status": "success",
-            "live_api_key": config.LIVE_ALPACA_API_KEY,
-            "live_secret_key": config.LIVE_ALPACA_SECRET_KEY,
-            "paper_api_key": config.PAPER_ALPACA_API_KEY,
-            "paper_secret_key": config.PAPER_ALPACA_SECRET_KEY,
-            "current_credentials": current_creds,
+            "current_credentials": {
+                "paper_trading": current_creds.get('paper_trading'),
+                "base_url": current_creds.get('base_url'),
+                "api_key_length": len(current_creds.get('api_key', '')) if current_creds.get('api_key') else 0
+            },
             "server_host": config.SERVER_HOST,
             "server_port": config.SERVER_PORT
         }
@@ -287,8 +288,6 @@ async def get_account_info():
         
     except Exception as e:
         logger.error(f"❌ Failed to get account info: {e}")
-        import traceback
-        logger.error(f"❌ Full traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Failed to fetch account information")
 
 @app.get("/dashboard/positions")
@@ -329,14 +328,16 @@ async def get_positions():
         
     except Exception as e:
         logger.error(f"❌ Failed to get positions: {e}")
-        import traceback
-        logger.error(f"❌ Full traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Failed to fetch positions")
 
 @app.get("/dashboard/recent-trades")
 async def get_recent_trades(limit: int = 50):
     """Get recent trade history from Alpaca account activities."""
     try:
+        # Validate input
+        if limit < 1 or limit > 1000:
+            raise HTTPException(status_code=400, detail="Limit must be between 1 and 1000")
+        
         logger.info(f"🔍 Getting recent trades with limit: {limit}")
         
         # First try to get actual trade history from Alpaca account activities
@@ -366,7 +367,7 @@ async def get_recent_trades(limit: int = 50):
                         'id': position.get('asset_id'),
                         'ticker': position.get('symbol'),
                         'trade_type': position.get('side', 'long'),
-                        'entry_time': datetime.now().isoformat(),  # Use current time as approximation
+                        'entry_time': datetime.now(timezone.utc).isoformat(),  # Use current time as approximation
                         'exit_time': None,
                         'entry_price': position.get('avg_entry_price'),
                         'exit_price': None,
@@ -499,11 +500,10 @@ async def get_upcoming_earnings_with_scan():
                     # Add scan results
                     'scan_result': scan_result
                 }
+                
                 transformed_earnings.append(transformed_earning)
             except Exception as e:
                 logger.error(f"Failed to transform earning {earning.get('symbol', 'unknown')}: {e}")
-                import traceback
-                logger.error(f"Transform traceback: {traceback.format_exc()}")
                 continue
         
         # Additional safety check: ensure no NaN values remain in the data
@@ -548,18 +548,15 @@ async def get_upcoming_earnings_with_scan():
         if auto_selected_count > 0:
             logger.info(f"🎯 Auto-selected {auto_selected_count} high-scoring stocks")
         
-        # Import config to get filter weights
-        from config import FILTER_WEIGHTS
+        # Get filter weights from config
         
         return {
             "success": True,
             "data": cleaned_earnings,
-            "filter_weights": FILTER_WEIGHTS
+            "filter_weights": config.FILTER_WEIGHTS
         }
     except Exception as e:
         logger.error(f"Failed to get upcoming earnings with scan: {e}")
-        import traceback
-        logger.error(f"Full traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Cache management endpoints
@@ -615,13 +612,31 @@ async def get_settings():
 async def update_setting(setting: SettingUpdate):
     """Update a setting value."""
     try:
+        # Validate inputs
+        if not setting.key or not setting.value:
+            raise HTTPException(status_code=400, detail="Setting key and value are required")
+        
+        # Validate setting key
+        valid_keys = ['auto_trading_enabled', 'risk_percentage', 'paper_trading_enabled']
+        if setting.key not in valid_keys:
+            raise HTTPException(status_code=400, detail=f"Invalid setting key. Must be one of: {', '.join(valid_keys)}")
+        
+        # Validate risk percentage if that's the setting
+        if setting.key == 'risk_percentage':
+            try:
+                risk_value = float(setting.value)
+                if risk_value < 0 or risk_value > 100:
+                    raise HTTPException(status_code=400, detail="Risk percentage must be between 0 and 100")
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Risk percentage must be a valid number")
+        
         success = database.set_setting(setting.key, setting.value)
         if not success:
             raise HTTPException(status_code=500, detail="Failed to update setting")
         
         # Automatically control scheduler when auto_trading_enabled changes
         if setting.key == 'auto_trading_enabled':
-            if setting.value == 'true':
+            if setting.value.lower() in ['true', '1', 'yes', 'on']:
                 trading_scheduler.start()
                 logger.info("Automated trading enabled - scheduler started automatically")
             else:
@@ -639,6 +654,8 @@ async def update_setting(setting: SettingUpdate):
             "success": True,
             "message": f"Setting {setting.key} updated successfully"
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to update setting: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -662,12 +679,10 @@ async def get_raw_earnings_data():
         combined_earnings = earnings_scanner.get_earnings_for_scanning()
         
         # Get some broader earnings data to compare
-        from datetime import datetime, timedelta
-        import pytz
         
-        utc_now = datetime.utcnow()
+        utc_now = datetime.now(timezone.utc)
         eastern_tz = pytz.timezone('US/Eastern')
-        today = utc_now.replace(tzinfo=pytz.UTC).astimezone(eastern_tz)
+        today = utc_now.astimezone(eastern_tz)
         
         # Get earnings for the next few days
         broader_earnings = []
@@ -706,8 +721,6 @@ async def get_raw_earnings_data():
         
     except Exception as e:
         logger.error(f"Raw earnings endpoint failed: {e}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Trade management endpoints
@@ -715,11 +728,17 @@ async def get_raw_earnings_data():
 async def get_selected_trades(status: Optional[str] = None):
     """Get selected trades, optionally filtered by status."""
     try:
+        # Validate status if provided
+        if status is not None and status not in ['selected', 'pending', 'executed', 'cancelled', 'failed']:
+            raise HTTPException(status_code=400, detail="Invalid status. Must be one of: selected, pending, executed, cancelled, failed")
+        
         trades = database.get_selected_trades_by_status(status=status)
         return {
             "success": True,
             "data": trades
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get selected trades: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -728,13 +747,29 @@ async def get_selected_trades(status: Optional[str] = None):
 async def select_trades_for_trading(selection: TradeSelection):
     """Mark selected trades for automatic execution."""
     try:
+        # Validate inputs
+        if not selection.trade_ids:
+            raise HTTPException(status_code=400, detail="Trade IDs list is required")
+        
+        if not isinstance(selection.trade_ids, list):
+            raise HTTPException(status_code=400, detail="Trade IDs must be a list")
+        
+        if len(selection.trade_ids) == 0:
+            raise HTTPException(status_code=400, detail="Trade IDs list cannot be empty")
+        
+        if len(selection.trade_ids) > 100:
+            raise HTTPException(status_code=400, detail="Cannot select more than 100 trades at once")
+        
         logger.info(f"🔍 Trade selection request received: {selection}")
         logger.info(f"🔍 Trade IDs: {selection.trade_ids}")
-        logger.info(f"🔍 Trade IDs type: {type(selection.trade_ids)}")
         
         success_count = 0
         for trade_id in selection.trade_ids:
-            logger.info(f"🔍 Processing trade ID: {trade_id} (type: {type(trade_id)})")
+            if not trade_id:
+                logger.warning(f"⚠️ Skipping empty trade ID")
+                continue
+                
+            logger.info(f"🔍 Processing trade ID: {trade_id}")
             if database.update_trade_status(trade_id, 'selected'):
                 success_count += 1
                 logger.info(f"✅ Successfully selected trade ID: {trade_id}")
@@ -747,21 +782,32 @@ async def select_trades_for_trading(selection: TradeSelection):
             "success": True,
             "message": f"Successfully selected {success_count} trades for execution"
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Failed to select trades: {e}")
-        import traceback
-        logger.error(f"❌ Trade selection traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/trades/select-stock")
 async def select_stock_for_execution(selection: TradeSelectionRequest):
     """Select or deselect a stock for automated trade execution."""
     try:
-        logger.info(f"🚀🚀🚀 STOCK SELECTION ENDPOINT CALLED 🚀🚀🚀")
+        # Validate inputs
+        if not selection.ticker or not selection.earnings_date:
+            raise HTTPException(status_code=400, detail="Ticker and earnings date are required")
+        
+        # Validate ticker format
+        if not selection.ticker.replace('-', '').replace('.', '').isalnum():
+            raise HTTPException(status_code=400, detail="Invalid ticker format")
+        
+        # Validate earnings date format (basic check)
+        if len(selection.earnings_date) != 10 or selection.earnings_date.count('-') != 2:
+            raise HTTPException(status_code=400, detail="Invalid earnings date format. Use YYYY-MM-DD")
+        
         logger.info(f"🔍 Stock selection request received: {selection}")
-        logger.info(f"🔍 Ticker: {selection.ticker} (type: {type(selection.ticker)})")
-        logger.info(f"🔍 Earnings date: {selection.earnings_date} (type: {type(selection.earnings_date)})")
-        logger.info(f"🔍 Is selected: {selection.is_selected} (type: {type(selection.is_selected)})")
+        logger.info(f"🔍 Ticker: {selection.ticker}")
+        logger.info(f"🔍 Earnings date: {selection.earnings_date}")
+        logger.info(f"🔍 Is selected: {selection.is_selected}")
         
         # Handle selection/deselection
         if selection.is_selected:
@@ -806,8 +852,6 @@ async def select_stock_for_execution(selection: TradeSelectionRequest):
             
     except Exception as e:
         logger.error(f"❌ Failed to select trade: {e}")
-        import traceback
-        logger.error(f"❌ Full traceback: {traceback.format_exc()}")
         return {
             "success": False,
             "error": str(e)
@@ -817,15 +861,16 @@ async def select_stock_for_execution(selection: TradeSelectionRequest):
 async def execute_specific_trade(trade_id: str):
     """Execute a specific trade by ID."""
     try:
+        # Validate input
+        if not trade_id:
+            raise HTTPException(status_code=400, detail="Trade ID is required")
+        
         logger.info(f"Executing specific trade: {trade_id}")
         
         # Get trade details from database
         trade = trading_scheduler.database.get_trade(trade_id)
         if not trade:
-            return {
-                "success": False,
-                "error": f"Trade {trade_id} not found"
-            }
+            raise HTTPException(status_code=404, detail=f"Trade {trade_id} not found")
         
         # Execute the trade
         result = await trading_scheduler.trade_executor.execute_specific_trade(trade)
@@ -842,12 +887,11 @@ async def execute_specific_trade(trade_id: str):
                 "error": result.get('message', 'Unknown error')
             }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to execute trade {trade_id}: {e}")
-        return {
-            "success": False,
-            "error": str(e)
-        }
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Scheduler management endpoints
 @app.get("/scheduler/status")
@@ -894,6 +938,14 @@ async def stop_scheduler():
 async def get_current_price(symbol: str):
     """Get current market price for a symbol."""
     try:
+        # Validate input
+        if not symbol:
+            raise HTTPException(status_code=400, detail="Symbol is required")
+        
+        # Validate symbol format
+        if not symbol.replace('-', '').replace('.', '').isalnum():
+            raise HTTPException(status_code=400, detail="Invalid symbol format")
+        
         price = alpaca_client.get_current_price(symbol.upper())
         if price is None:
             raise HTTPException(status_code=404, detail="Price not found")
@@ -903,33 +955,53 @@ async def get_current_price(symbol: str):
             "data": {
                 "symbol": symbol.upper(),
                 "price": price,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get price for {symbol}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/market/options/{symbol}")
-async def get_options_chain(symbol: str, expiration: str):
-    """Get options chain for a symbol and expiration date."""
+async def discover_options(symbol: str, target_expiration: str = None):
+    """Discover available options for a symbol using Alpaca API."""
     try:
-        chain = alpaca_client.get_options_chain(symbol.upper(), expiration)
-        if not chain:
-            raise HTTPException(status_code=404, detail="Options chain not found")
+        # Validate input
+        if not symbol:
+            raise HTTPException(status_code=400, detail="Symbol is required")
+        
+        # Validate symbol format
+        if not symbol.replace('-', '').replace('.', '').isalnum():
+            raise HTTPException(status_code=400, detail="Invalid symbol format")
+        
+        options_data = alpaca_client.discover_available_options(symbol.upper(), target_expiration)
+        if not options_data:
+            raise HTTPException(status_code=404, detail="Options not found")
         
         return {
             "success": True,
-            "data": chain
+            "data": options_data
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Failed to get options chain for {symbol}: {e}")
+        logger.error(f"Failed to discover options for {symbol}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/market/calendar-spread/{symbol}")
 async def calculate_calendar_spread(symbol: str, short_exp: str, long_exp: str, option_type: str = "call"):
     """Calculate the cost of a calendar spread using call options."""
     try:
+        # Validate inputs
+        if not symbol or not short_exp or not long_exp:
+            raise HTTPException(status_code=400, detail="Symbol, short_exp, and long_exp are required")
+        
+        # Validate symbol format
+        if not symbol.replace('-', '').replace('.', '').isalnum():
+            raise HTTPException(status_code=400, detail="Invalid symbol format")
+        
         # For this strategy, we always use call options
         if option_type.lower() != 'call':
             logger.info(f"Strategy requires call options, but {option_type} was requested. Using calls.")
@@ -949,6 +1021,8 @@ async def calculate_calendar_spread(symbol: str, short_exp: str, long_exp: str, 
             "description": f"Strategy: Sell {short_exp} call, buy {long_exp} call at strike {spread_info['strike_price']}"
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to calculate calendar spread for {symbol}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1059,8 +1133,6 @@ async def validation_exception_handler(request: Request, exc: ValidationError):
 async def global_exception_handler(request: Request, exc: Exception):
     """Global exception handler."""
     logger.error(f"Unhandled exception: {exc}")
-    import traceback
-    logger.error(f"Full traceback: {traceback.format_exc()}")
     return HTTPException(status_code=500, detail=str(exc))
 
 
@@ -1076,6 +1148,7 @@ async def debug_alpaca_activities():
             "count": len(activities)
         }
     except Exception as e:
+        logger.error(f"Debug endpoint failed: {e}")
         return {
             "success": False,
             "error": str(e)

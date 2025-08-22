@@ -20,6 +20,8 @@ class EarningsScanner:
             raise ValueError("Finnhub API key not configured")
         
         self.base_url = "https://finnhub.io/api/v1"
+        # Store timezone as instance variable for consistency with other services
+        self.et_tz = pytz.timezone('US/Eastern')
         logger.info("Earnings scanner initialized")
     
     def get_earnings_calendar(self, start_date: str = None, end_date: str = None) -> List[Dict]:
@@ -35,15 +37,13 @@ class EarningsScanner:
         """
         try:
             if not start_date:
-                # Use UTC time and convert to US Eastern timezone for market operations
-                utc_now = datetime.utcnow()
-                eastern_tz = pytz.timezone('US/Eastern')
-                start_date = utc_now.astimezone(eastern_tz).strftime("%Y-%m-%d")
+                # Use ET timezone consistently with other services
+                now_et = datetime.now(self.et_tz)
+                start_date = now_et.strftime("%Y-%m-%d")
             if not end_date:
-                # Use UTC time and convert to US Eastern timezone for market operations
-                utc_now = datetime.utcnow()
-                eastern_tz = pytz.timezone('US/Eastern')
-                end_date = (utc_now.astimezone(eastern_tz) + timedelta(days=7)).strftime("%Y-%m-%d")
+                # Use ET timezone consistently with other services
+                now_et = datetime.now(self.et_tz)
+                end_date = (now_et + timedelta(days=7)).strftime("%Y-%m-%d")
             
             url = f"{self.base_url}/calendar/earnings"
             params = {
@@ -80,10 +80,9 @@ class EarningsScanner:
         - After market close today (4:00 PM ET) but before market open tomorrow (9:30 AM ET)
         """
         try:
-            # Use UTC time and convert to US Eastern timezone for market operations
-            utc_now = datetime.utcnow()
-            eastern_tz = pytz.timezone('US/Eastern')
-            today = utc_now.replace(tzinfo=pytz.UTC).astimezone(eastern_tz).date()
+            # Use ET timezone consistently with other services
+            now_et = datetime.now(self.et_tz)
+            today = now_et.date()
             tomorrow = today + timedelta(days=1)
             
             filtered_earnings = []
@@ -136,15 +135,14 @@ class EarningsScanner:
     def get_tomorrow_earnings(self) -> List[Dict]:
         """Get earnings for tomorrow (before market open)."""
         try:
-            # Use UTC time and convert to US Eastern timezone for market operations
-            utc_now = datetime.now(timezone.utc)
-            eastern_tz = pytz.timezone('US/Eastern')
-            tomorrow = (utc_now.astimezone(eastern_tz) + timedelta(days=1)).strftime("%Y-%m-%d")
+            # Use ET timezone consistently with other services
+            now_et = datetime.now(self.et_tz)
+            tomorrow = (now_et + timedelta(days=1)).strftime("%Y-%m-%d")
             
             earnings = self.get_earnings_calendar(tomorrow, tomorrow)
             
             # Filter for before market open and exclude TBA stocks
-            bmo_earnings = [e for e in earnings if e.get('hour') == 'bmo' and e.get('hour') not in ['', 'tna']]
+            bmo_earnings = [e for e in earnings if e.get('hour') == 'bmo']
             
             return bmo_earnings
             
@@ -155,14 +153,14 @@ class EarningsScanner:
     def get_today_post_market_earnings(self) -> List[Dict]:
         """Get today's earnings that occur after market close."""
         try:
-            utc_now = datetime.now(timezone.utc)
-            eastern_tz = pytz.timezone('US/Eastern')
-            today = utc_now.astimezone(eastern_tz).strftime("%Y-%m-%d")
+            # Use ET timezone consistently with other services
+            now_et = datetime.now(self.et_tz)
+            today = now_et.strftime("%Y-%m-%d")
             
             earnings = self.get_earnings_calendar(today, today)
             
             # Filter for after market close and exclude TBA stocks
-            amc_earnings = [e for e in earnings if e.get('hour') == 'amc' and e.get('hour') not in ['', 'tna']]
+            amc_earnings = [e for e in earnings if e.get('hour') == 'amc']
             
             return amc_earnings
             
@@ -173,13 +171,46 @@ class EarningsScanner:
     def get_earnings_for_scanning(self) -> List[Dict]:
         """
         Get earnings that should be scanned for trading opportunities.
-        Combines tomorrow pre-market and today post-market earnings.
+        Combines next trading day earnings with any remaining today earnings.
         """
         try:
-            tomorrow_earnings = self.get_tomorrow_earnings()
-            today_earnings = self.get_today_post_market_earnings()
+            # Get current time in ET (consistent with other services)
+            now_et = datetime.now(self.et_tz)
+            today = now_et.date()
             
-            all_scan_earnings = tomorrow_earnings + today_earnings
+            # Find the next trading day (skip weekends)
+            next_trading_day = today
+            days_ahead = 1
+            max_days_to_check = 10  # Safety limit to prevent infinite loops
+            
+            while days_ahead <= max_days_to_check:
+                next_trading_day = today + timedelta(days=days_ahead)
+                # Skip weekends (Saturday=5, Sunday=6)
+                if next_trading_day.weekday() < 5:  # Monday=0, Friday=4
+                    break
+                days_ahead += 1
+            else:
+                # If we couldn't find a trading day within max_days_to_check
+                logger.warning(f"Could not find next trading day within {max_days_to_check} days")
+                # Fall back to Monday of next week
+                days_until_monday = (7 - today.weekday()) % 7
+                if days_until_monday == 0:  # Today is Monday
+                    days_until_monday = 7
+                next_trading_day = today + timedelta(days=days_until_monday)
+            
+            # Get earnings for the next trading day
+            next_trading_str = next_trading_day.strftime('%Y-%m-%d')
+            next_trading_earnings = self.get_earnings_calendar(next_trading_str, next_trading_str)
+            
+            # Filter for BMO earnings on next trading day
+            bmo_earnings = [e for e in next_trading_earnings if e.get('hour') == 'bmo']
+            
+            # Get any remaining AMC earnings for today (if market is still open)
+            today_earnings = self.get_earnings_calendar(today.strftime('%Y-%m-%d'), today.strftime('%Y-%m-%d'))
+            today_amc = [e for e in today_earnings if e.get('hour') == 'amc']
+            
+            # Combine earnings
+            all_scan_earnings = bmo_earnings + today_amc
             
             # Remove duplicates based on symbol
             seen_symbols = set()
@@ -190,6 +221,9 @@ class EarningsScanner:
                 if symbol and symbol not in seen_symbols:
                     seen_symbols.add(symbol)
                     unique_earnings.append(earning)
+            
+            logger.info(f"Found {len(unique_earnings)} earnings for scanning: "
+                       f"{len(bmo_earnings)} BMO on {next_trading_str}, {len(today_amc)} AMC today")
             
             return unique_earnings
             

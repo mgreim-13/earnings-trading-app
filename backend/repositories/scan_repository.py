@@ -50,19 +50,27 @@ class ScanRepository(BaseRepository):
         try:
             query = """
                 SELECT * FROM scan_results 
-                WHERE scanned_at >= datetime('now', '-{} days')
+                WHERE scanned_at >= datetime('now', ? || ' days')
                 ORDER BY scanned_at DESC
-            """.format(days)
+            """
             
-            results = self.execute_query(query)
+            results = self.execute_query(query, (f'-{days}',))
             
             # Parse filters JSON back to dict
             for result in results:
                 if result.get('filters'):
                     try:
-                        result['filters'] = json.loads(result['filters'])
+                        filters_data = json.loads(result['filters'])
+                        # Map filters back to scores for frontend compatibility
+                        result['scores'] = filters_data
                     except json.JSONDecodeError:
                         result['filters'] = {}
+                        result['scores'] = {}
+                else:
+                    result['scores'] = {}
+                
+                # Map recommendation_score to total_score for frontend compatibility
+                result['total_score'] = result.get('recommendation_score')
             
             return results
             
@@ -86,12 +94,20 @@ class ScanRepository(BaseRepository):
             
             result = results[0]
             
-            # Parse filters JSON back to dict
+            # Parse filters JSON back to dict and map to scores
             if result.get('filters'):
                 try:
-                    result['filters'] = json.loads(result['filters'])
+                    filters_data = json.loads(result['filters'])
+                    # Map filters back to scores for frontend compatibility
+                    result['scores'] = filters_data
                 except json.JSONDecodeError:
                     result['filters'] = {}
+                    result['scores'] = {}
+            else:
+                result['scores'] = {}
+            
+            # Map recommendation_score to total_score for frontend compatibility
+            result['total_score'] = result.get('recommendation_score')
             
             return result
             
@@ -122,16 +138,23 @@ class ScanRepository(BaseRepository):
             for result in results:
                 ticker = result['ticker']
                 if ticker not in ticker_results or result['scanned_at'] > ticker_results[ticker]['scanned_at']:
-                    # Parse filters JSON back to dict
+                    # Parse filters JSON back to dict and map to scores
                     if result.get('filters'):
                         try:
-                            result['filters'] = json.loads(result['filters'])
+                            filters_data = json.loads(result['filters'])
+                            # Map filters back to scores for frontend compatibility
+                            result['scores'] = filters_data
                         except json.JSONDecodeError:
                             result['filters'] = {}
+                            result['scores'] = {}
+                    else:
+                        result['scores'] = {}
+                    
+                    # Map recommendation_score to total_score for frontend compatibility
+                    result['total_score'] = result.get('recommendation_score')
                     
                     ticker_results[ticker] = result
             
-            logger.info(f"✅ Retrieved {len(ticker_results)} cached scan results")
             return ticker_results
             
         except Exception as e:

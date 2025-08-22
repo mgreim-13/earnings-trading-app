@@ -54,8 +54,8 @@ class TestTradingSafety:
 
     @pytest.mark.unit
     @pytest.mark.safety
-    def test_prevent_live_trading_in_tests_live_trading_disabled(self, mock_config):
-        """Test that live trading is blocked when disabled."""
+    def test_prevent_live_trading_in_tests_paper_trading_allowed_when_live_disabled(self, mock_config):
+        """Test that paper trading is allowed even when live trading is disabled."""
         with patch('config.LIVE_TRADING_ALLOWED', False), \
              patch('config.get_current_alpaca_credentials') as mock_creds:
             mock_creds.return_value = {
@@ -68,8 +68,9 @@ class TestTradingSafety:
             def test_function():
                 return "success"
             
-            with pytest.raises(TradingSafetyError, match="LIVE TRADING BLOCKED"):
-                test_function()
+            # Paper trading should be allowed even when live trading is disabled
+            result = test_function()
+            assert result == "success"
 
     @pytest.mark.unit
     @pytest.mark.safety

@@ -505,7 +505,7 @@ const UpcomingEarnings = () => {
     <Box>
       <Box display="flex" justifyContent="space-between" alignItems="center" mb={3}>
         <Typography variant="h4" component="h1">
-          Trade Recommendations
+          Daily Trade Recommendations
         </Typography>
         <Box display="flex" alignItems="center" gap={2}>
             {/* Cache Status */}
@@ -824,8 +824,6 @@ const UpcomingEarnings = () => {
                                               </TableContainer>
                                             </>
                                           )}
-
-
                                         </Box>
                                       )}
                                     </AccordionDetails>

@@ -4,6 +4,7 @@ Handles all trade selection-related database operations.
 """
 
 import logging
+import sqlite3
 from datetime import datetime
 from typing import List, Dict, Optional
 from .base_repository import BaseRepository
@@ -264,5 +265,4 @@ class TradeSelectionsRepository(BaseRepository):
     
     def _get_connection(self):
         """Get a database connection for transaction operations."""
-        import sqlite3
         return sqlite3.connect(self.db_path)

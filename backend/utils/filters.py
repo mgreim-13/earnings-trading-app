@@ -360,6 +360,7 @@ def compute_recommendation(ticker):
         try:
             earnings_dates = stock.earnings_dates
             if earnings_dates is not None and not earnings_dates.empty:
+                # Note: This is used for relative time calculations, timezone not critical
                 now = datetime.now()
                 past_earnings = earnings_dates[earnings_dates['Earnings Date'] < now].tail(4)
                 moves = []

@@ -145,10 +145,15 @@ class TradingScheduler:
         try:
             jobs = []
             for job in self.scheduler.get_jobs():
+                try:
+                    next_run = job.next_run_time.isoformat() if hasattr(job, 'next_run_time') and job.next_run_time else None
+                except AttributeError:
+                    next_run = None
+                
                 jobs.append({
                     'id': job.id,
                     'name': job.name,
-                    'next_run': job.next_run_time.isoformat() if job.next_run_time else None,
+                    'next_run': next_run,
                     'trigger': str(job.trigger)
                 })
             
@@ -180,7 +185,7 @@ class TradingScheduler:
             logger.info(f"Found {len(selected_trades)} selected trades")
             
             # Filter trades for today's execution
-            today = datetime.now().date()
+            today = datetime.now(self.et_tz).date()
             today_trades = []
             
             for trade in selected_trades:
