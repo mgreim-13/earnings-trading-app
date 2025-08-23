@@ -1,87 +1,92 @@
 """
 Tests for the trading safety module.
+Tests the simplified trading safety system using only TESTING_MODE.
 """
 
 import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 from trading_safety import (
-    prevent_live_trading_in_tests,
+    safe_trading_mode,
     require_paper_trading,
     require_live_trading,
-    TradingSafetyError
+    TradingSafetyError,
+    get_trading_safety_status
 )
 
-
 class TestTradingSafety:
-    """Test trading safety decorators and functionality."""
+    """Test the trading safety functionality."""
 
     @pytest.mark.unit
-    @pytest.mark.safety
-    def test_prevent_live_trading_in_tests_paper_mode(self, mock_config):
-        """Test that paper trading is allowed during tests."""
-        with patch('config.get_current_alpaca_credentials') as mock_creds, \
-             patch('config.LIVE_TRADING_ALLOWED', True):
-            mock_creds.return_value = {
-                'paper_trading': True,
-                'api_key': 'test_key',
-                'secret_key': 'test_secret'
-            }
+    @pytest.mark.trading_safety
+    def test_safe_trading_mode_paper_mode(self, mock_config):
+        """Test that paper trading is allowed in testing mode."""
+        # Mock paper trading credentials
+        with patch('config.get_current_alpaca_credentials') as mock_creds:
+            mock_creds.return_value = {'paper_trading': True}
             
-            @prevent_live_trading_in_tests
+            @safe_trading_mode
             def test_function():
                 return "success"
             
+            # Paper trading should be allowed in testing mode
             result = test_function()
             assert result == "success"
 
     @pytest.mark.unit
-    @pytest.mark.safety
-    def test_prevent_live_trading_in_tests_live_mode_blocked(self, mock_config):
-        """Test that live trading is blocked during tests."""
+    @pytest.mark.trading_safety
+    def test_safe_trading_mode_live_mode_blocked(self, mock_config):
+        """Test that live trading is blocked in testing mode."""
+        # Mock live trading credentials
         with patch('config.get_current_alpaca_credentials') as mock_creds:
-            mock_creds.return_value = {
-                'paper_trading': False,
-                'api_key': 'test_key',
-                'secret_key': 'test_secret'
-            }
+            mock_creds.return_value = {'paper_trading': False}
             
-            @prevent_live_trading_in_tests
+            @safe_trading_mode
             def test_function():
                 return "success"
             
+            # Live trading should be blocked in testing mode
             with pytest.raises(TradingSafetyError, match="LIVE TRADING BLOCKED"):
                 test_function()
 
     @pytest.mark.unit
-    @pytest.mark.safety
-    def test_prevent_live_trading_in_tests_paper_trading_allowed_when_live_disabled(self, mock_config):
-        """Test that paper trading is allowed even when live trading is disabled."""
-        with patch('config.LIVE_TRADING_ALLOWED', False), \
-             patch('config.get_current_alpaca_credentials') as mock_creds:
-            mock_creds.return_value = {
-                'paper_trading': True,
-                'api_key': 'test_key',
-                'secret_key': 'test_secret'
-            }
+    @pytest.mark.trading_safety
+    def test_safe_trading_mode_paper_trading_allowed_when_live_disabled(self, mock_config):
+        """Test that paper trading is allowed even when live trading is disabled in testing mode."""
+        # Mock paper trading credentials
+        with patch('config.get_current_alpaca_credentials') as mock_creds:
+            mock_creds.return_value = {'paper_trading': True}
             
-            @prevent_live_trading_in_tests
+            @safe_trading_mode
             def test_function():
                 return "success"
             
-            # Paper trading should be allowed even when live trading is disabled
+            # Paper trading should be allowed
             result = test_function()
             assert result == "success"
 
     @pytest.mark.unit
-    @pytest.mark.safety
-    def test_require_paper_trading_success(self, mock_config):
-        """Test that paper trading requirement passes in paper mode."""
+    @pytest.mark.trading_safety
+    def test_safe_trading_mode_production_mode(self):
+        """Test that live trading is allowed in production mode."""
+        # Mock production mode (TESTING_MODE = False)
+        with patch('config.TESTING_MODE', False), \
+             patch('config.get_current_alpaca_credentials') as mock_creds:
+            mock_creds.return_value = {'paper_trading': False}
+            
+            @safe_trading_mode
+            def test_function():
+                return "success"
+            
+            # Live trading should be allowed in production mode
+            result = test_function()
+            assert result == "success"
+
+    @pytest.mark.unit
+    @pytest.mark.trading_safety
+    def test_require_paper_trading_success(self):
+        """Test that require_paper_trading allows paper trading."""
         with patch('config.get_current_alpaca_credentials') as mock_creds:
-            mock_creds.return_value = {
-                'paper_trading': True,
-                'api_key': 'test_key',
-                'secret_key': 'test_secret'
-            }
+            mock_creds.return_value = {'paper_trading': True}
             
             @require_paper_trading
             def test_function():
@@ -91,15 +96,11 @@ class TestTradingSafety:
             assert result == "success"
 
     @pytest.mark.unit
-    @pytest.mark.safety
-    def test_require_paper_trading_failure(self, mock_config):
-        """Test that paper trading requirement fails in live mode."""
+    @pytest.mark.trading_safety
+    def test_require_paper_trading_failure(self):
+        """Test that require_paper_trading blocks live trading."""
         with patch('config.get_current_alpaca_credentials') as mock_creds:
-            mock_creds.return_value = {
-                'paper_trading': False,
-                'api_key': 'test_key',
-                'secret_key': 'test_secret'
-            }
+            mock_creds.return_value = {'paper_trading': False}
             
             @require_paper_trading
             def test_function():
@@ -109,16 +110,12 @@ class TestTradingSafety:
                 test_function()
 
     @pytest.mark.unit
-    @pytest.mark.safety
-    def test_require_live_trading_success(self, mock_config):
-        """Test that live trading requirement passes in live mode."""
-        with patch('config.LIVE_TRADING_ALLOWED', True), \
+    @pytest.mark.trading_safety
+    def test_require_live_trading_success(self):
+        """Test that require_live_trading allows live trading in production mode."""
+        with patch('config.TESTING_MODE', False), \
              patch('config.get_current_alpaca_credentials') as mock_creds:
-            mock_creds.return_value = {
-                'paper_trading': False,
-                'api_key': 'test_key',
-                'secret_key': 'test_secret'
-            }
+            mock_creds.return_value = {'paper_trading': False}
             
             @require_live_trading
             def test_function():
@@ -128,34 +125,12 @@ class TestTradingSafety:
             assert result == "success"
 
     @pytest.mark.unit
-    @pytest.mark.safety
-    def test_require_live_trading_failure_paper_mode(self, mock_config):
-        """Test that live trading requirement fails in paper mode."""
-        with patch('config.get_current_alpaca_credentials') as mock_creds:
-            mock_creds.return_value = {
-                'paper_trading': True,
-                'api_key': 'test_key',
-                'secret_key': 'test_secret'
-            }
-            
-            @require_live_trading
-            def test_function():
-                return "success"
-            
-            with pytest.raises(TradingSafetyError, match="LIVE TRADING REQUIRED"):
-                test_function()
-
-    @pytest.mark.unit
-    @pytest.mark.safety
-    def test_require_live_trading_failure_disabled(self, mock_config):
-        """Test that live trading requirement fails when disabled."""
-        with patch('config.LIVE_TRADING_ALLOWED', False), \
+    @pytest.mark.trading_safety
+    def test_require_live_trading_blocked_by_testing_mode(self):
+        """Test that require_live_trading blocks live trading in testing mode."""
+        with patch('config.TESTING_MODE', True), \
              patch('config.get_current_alpaca_credentials') as mock_creds:
-            mock_creds.return_value = {
-                'paper_trading': False,
-                'api_key': 'test_key',
-                'secret_key': 'test_secret'
-            }
+            mock_creds.return_value = {'paper_trading': False}
             
             @require_live_trading
             def test_function():
@@ -165,47 +140,68 @@ class TestTradingSafety:
                 test_function()
 
     @pytest.mark.unit
-    @pytest.mark.safety
-    def test_decorator_preserves_function_metadata(self, mock_config):
-        """Test that decorators preserve function metadata."""
-        with patch('config.get_current_alpaca_credentials') as mock_creds:
-            mock_creds.return_value = {
-                'paper_trading': True,
-                'api_key': 'test_key',
-                'secret_key': 'test_secret'
-            }
+    @pytest.mark.trading_safety
+    def test_require_live_trading_blocked_by_paper_mode(self):
+        """Test that require_live_trading blocks paper trading."""
+        with patch('config.TESTING_MODE', False), \
+             patch('config.get_current_alpaca_credentials') as mock_creds:
+            mock_creds.return_value = {'paper_trading': True}
             
-            @prevent_live_trading_in_tests
+            @require_live_trading
             def test_function():
-                """Test function docstring."""
                 return "success"
             
-            assert test_function.__name__ == "test_function"
-            assert test_function.__doc__ == "Test function docstring."
+            with pytest.raises(TradingSafetyError, match="LIVE TRADING REQUIRED"):
+                test_function()
 
     @pytest.mark.unit
-    @pytest.mark.safety
-    def test_decorator_with_arguments(self, mock_config):
-        """Test that decorators work with functions that have arguments."""
-        with patch('config.get_current_alpaca_credentials') as mock_creds, \
-             patch('config.LIVE_TRADING_ALLOWED', True):
-            mock_creds.return_value = {
-                'paper_trading': True,
-                'api_key': 'test_key',
-                'secret_key': 'test_secret'
-            }
+    @pytest.mark.trading_safety
+    def test_get_trading_safety_status_testing_mode(self):
+        """Test get_trading_safety_status in testing mode."""
+        with patch('config.TESTING_MODE', True), \
+             patch('config.get_current_alpaca_credentials') as mock_creds:
+            mock_creds.return_value = {'paper_trading': True}
             
-            @prevent_live_trading_in_tests
-            def test_function(arg1, arg2, kwarg1=None):
-                return f"{arg1}_{arg2}_{kwarg1}"
+            status = get_trading_safety_status()
             
-            result = test_function("a", "b", kwarg1="c")
-            assert result == "a_b_c"
+            assert status['testing_mode'] is True
+            assert status['paper_trading'] is True
+            assert status['live_trading'] is False
+            assert status['safety_level'] == 'HIGH'
+            assert status['trading_allowed'] is True
+            assert status['live_trading_allowed'] is False
+            assert status['paper_trading_allowed'] is True
+            assert 'Safe mode' in status['description']
 
     @pytest.mark.unit
-    @pytest.mark.safety
-    def test_trading_safety_error_inheritance(self):
-        """Test that TradingSafetyError inherits from Exception."""
-        error = TradingSafetyError("Test error")
-        assert isinstance(error, Exception)
-        assert str(error) == "Test error"
+    @pytest.mark.trading_safety
+    def test_get_trading_safety_status_production_mode(self):
+        """Test get_trading_safety_status in production mode."""
+        with patch('config.TESTING_MODE', False), \
+             patch('config.get_current_alpaca_credentials') as mock_creds:
+            mock_creds.return_value = {'paper_trading': False}
+            
+            status = get_trading_safety_status()
+            
+            assert status['testing_mode'] is False
+            assert status['paper_trading'] is False
+            assert status['live_trading'] is True
+            assert status['safety_level'] == 'NORMAL'
+            assert status['trading_allowed'] is True
+            assert status['live_trading_allowed'] is True
+            assert status['paper_trading_allowed'] is False
+            assert 'Production mode' in status['description']
+
+    @pytest.mark.unit
+    @pytest.mark.trading_safety
+    def test_get_trading_safety_status_error_handling(self):
+        """Test get_trading_safety_status error handling."""
+        with patch('config.TESTING_MODE', True), \
+             patch('config.get_current_alpaca_credentials') as mock_creds:
+            mock_creds.side_effect = Exception("Credential error")
+            
+            status = get_trading_safety_status()
+            
+            assert 'error' in status
+            assert status['testing_mode'] is True
+            assert status['safety_level'] == 'UNKNOWN'

@@ -240,6 +240,140 @@ npm test
 - **Environment Validation**: Required variable checking
 - **Trading Safety**: Live trading prevention in test mode
 
+## 🛡️ Trading Safety System
+
+The app includes a sophisticated **dual-layer safety system** that prevents accidental live trading while allowing users to control their trading mode.
+
+### **How the Safety System Works**
+
+#### **Layer 1: TESTING_MODE (Environment Variable)**
+This is the **primary safety gate** that controls whether live trading is allowed at all:
+
+```bash
+# Default: Safe mode (blocks live trading)
+export TESTING_MODE=true
+
+# Production mode (allows live trading)
+export TESTING_MODE=false
+```
+
+**When TESTING_MODE = true (default):**
+- ✅ **Paper trading is allowed** (safe by default)
+- ❌ **Live trading is completely blocked** (prevents accidents)
+- 🔒 All trading functions are wrapped with `@safe_trading_mode` decorator
+- 🚫 Attempts to execute live trades throw `TradingSafetyError`
+
+**When TESTING_MODE = false:**
+- ✅ **Live trading is allowed** (if user has live credentials)
+- ✅ **Paper trading is allowed** (if user has paper credentials)
+- 🔓 User's choice in settings actually matters
+
+#### **Layer 2: Paper/Live Toggle (Settings Page)**
+This controls **which credentials are used** but doesn't override the safety system:
+
+- **Paper Trading (Toggle ON)**: Uses paper trading API credentials
+- **Live Trading (Toggle OFF)**: Uses live trading API credentials
+
+**Important**: The toggle only changes credentials - it doesn't change TESTING_MODE!
+
+### **Safety Decorator Logic**
+
+Every critical trading function is protected by the `@safe_trading_mode` decorator:
+
+```python
+@safe_trading_mode
+def place_calendar_spread_order(self, symbol, short_exp, long_exp, ...):
+    # This function will be blocked if:
+    # 1. TESTING_MODE = true AND user tries live trading
+    # 2. Credentials are invalid
+    pass
+```
+
+**The decorator checks:**
+1. **Is TESTING_MODE enabled?**
+   - If YES: Only allow paper trading
+   - If NO: Allow user's choice (paper or live)
+2. **Are the credentials valid?**
+   - Paper credentials for paper trading
+   - Live credentials for live trading
+
+### **Real-World Example**
+
+Here's what happens in different scenarios:
+
+#### **Scenario 1: Default Setup (TESTING_MODE = true)**
+```bash
+# User sets paper/live toggle to LIVE
+# But TESTING_MODE = true still blocks live trading
+# Result: ❌ Live trading blocked, trades appear to "not work"
+```
+
+#### **Scenario 2: Production Setup (TESTING_MODE = false)**
+```bash
+# User sets paper/live toggle to LIVE
+# TESTING_MODE = false allows live trading
+# Result: ✅ Live trading works as expected
+```
+
+#### **Scenario 3: Mixed Setup**
+```bash
+# TESTING_MODE = false (allows live trading)
+# User sets toggle to PAPER
+# Result: ✅ Paper trading works with paper credentials
+```
+
+### **How to Configure for Live Trading**
+
+**⚠️ WARNING: Only enable live trading if you understand the risks!**
+
+1. **Set TESTING_MODE to false:**
+   ```bash
+   export TESTING_MODE=false
+   ```
+
+2. **Verify your live trading credentials are set:**
+   ```bash
+   export LIVE_ALPACA_API_KEY="your_live_key"
+   export LIVE_ALPACA_SECRET_KEY="your_live_secret"
+   ```
+
+3. **Set the paper/live toggle to LIVE in the settings page**
+
+4. **Test with small amounts first**
+
+### **Safety System Benefits**
+
+- 🛡️ **Prevents Accidents**: Can't accidentally trade live money in test mode
+- 🔒 **Credential Isolation**: Paper and live credentials are completely separate
+- 🎯 **User Control**: Users can choose their trading mode safely
+- 🚫 **Fail-Safe Default**: Defaults to safe mode (paper trading only)
+- 🔍 **Transparent**: Clear logging of what mode is active
+
+### **Troubleshooting Common Issues**
+
+#### **"Trades not working" or "Orders never trigger"**
+- Check if TESTING_MODE is blocking live trading
+- Verify credentials are valid and working
+- Check scheduler status at `/scheduler/status` endpoint
+
+#### **"Paper trading not working"**
+- Ensure TESTING_MODE = true (or false with paper credentials)
+- Verify paper trading credentials are set
+- Check if scheduler is running
+
+#### **"Live trading blocked"**
+- Set TESTING_MODE = false
+- Verify live trading credentials are set
+- Check trading safety status at `/trading-safety/status` endpoint
+
+### **Monitoring Safety Status**
+
+The app provides several endpoints to monitor the safety system:
+
+- **`/config-test`**: Check current credentials and trading mode
+- **`/scheduler/status`**: Verify automated trading is running
+- **`/trading-safety/status`**: Check safety system configuration
+
 ## 📊 Performance
 
 - **Scan Speed**: Sub-second earnings analysis

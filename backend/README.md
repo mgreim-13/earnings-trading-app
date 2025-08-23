@@ -123,14 +123,8 @@ from ..core.alpaca_client import AlpacaClient
 
 ## 🏃‍♂️ **Running the Application**
 
-### **Using New Structure**
 ```bash
 python main.py
-```
-
-### **Using Legacy Entry Point**
-```bash
-python start_backend.py  # Still works with old structure
 ```
 
 ## 📊 **Code Metrics**

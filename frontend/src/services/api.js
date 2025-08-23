@@ -69,7 +69,7 @@ export const tradesAPI = {
     return api.get(`/trades/selected${params}`);
   },
   selectTrades: (tradeIds) => api.post('/trades/select', { trade_ids: tradeIds }),
-  executeTrade: (tradeId) => api.post(`/trades/execute/${tradeId}`),
+
 };
 
 // Trade selection API calls

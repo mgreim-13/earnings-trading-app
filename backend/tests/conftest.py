@@ -9,10 +9,9 @@ import shutil
 from unittest.mock import Mock, patch
 from pathlib import Path
 
-# Set testing environment
+# Set testing environment variables
 os.environ['TESTING_MODE'] = 'true'
-os.environ['PREVENT_LIVE_TRADING_IN_TESTS'] = 'true'
-os.environ['LIVE_TRADING_ALLOWED'] = 'false'
+# Removed: LIVE_TRADING_ALLOWED and PREVENT_LIVE_TRADING_IN_TESTS - consolidated into TESTING_MODE
 
 @pytest.fixture(scope="session")
 def test_db_path():
@@ -25,13 +24,9 @@ def test_db_path():
 @pytest.fixture(scope="function")
 def mock_config():
     """Mock configuration for testing."""
+    # Mock the configuration for testing
     with patch('config.TESTING_MODE', True), \
-         patch('config.PREVENT_LIVE_TRADING_IN_TESTS', True), \
-         patch('config.LIVE_TRADING_ALLOWED', False), \
-         patch('config.PAPER_ALPACA_API_KEY', 'test_paper_key'), \
-         patch('config.PAPER_ALPACA_SECRET_KEY', 'test_paper_secret'), \
-         patch('config.LIVE_ALPACA_API_KEY', 'test_live_key'), \
-         patch('config.LIVE_ALPACA_SECRET_KEY', 'test_live_secret'):
+         patch('config.get_current_alpaca_credentials') as mock_creds:
         yield
 
 @pytest.fixture(scope="function")

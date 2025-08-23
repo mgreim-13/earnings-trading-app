@@ -1,11 +1,12 @@
 """
 Trading Safety Module
 Provides decorators and safety checks to prevent accidental live trading during tests.
+Simplified to use a single TESTING_MODE constant for all safety controls.
 """
 
 import functools
 import logging
-from typing import Callable, Any
+from typing import Callable, Any, Dict
 import config
 
 logger = logging.getLogger(__name__)
@@ -14,50 +15,44 @@ class TradingSafetyError(Exception):
     """Exception raised when trading safety checks fail."""
     pass
 
-def prevent_live_trading_in_tests(func: Callable) -> Callable:
+def safe_trading_mode(func: Callable) -> Callable:
     """
-    Decorator to prevent live trading during testing.
+    Unified decorator for trading safety checks.
     
     This decorator ensures that live trading operations cannot be executed
-    during testing, even if the function is called.
+    when in testing mode, unless paper trading is enabled.
+    
+    Safety Logic:
+    - TESTING_MODE = true: Only paper trading allowed (safe by default)
+    - TESTING_MODE = false: Live trading allowed (production mode)
     """
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        # Check if we're in testing mode
-        if config.TESTING_MODE:
-            logger.warning(f"⚠️ TESTING MODE: {func.__name__} called during testing")
-            
-            # If we're preventing live trading in tests, check trading mode
+        try:
+            # Get current trading mode
             current_creds = config.get_current_alpaca_credentials()
-            if config.PREVENT_LIVE_TRADING_IN_TESTS and not current_creds['paper_trading']:
-                error_msg = f"LIVE TRADING BLOCKED: {func.__name__} cannot execute live trades during testing"
-                logger.error(f"❌ {error_msg}")
-                raise TradingSafetyError(error_msg)
+            paper_trading = current_creds['paper_trading']
             
-            # If live trading is not allowed, block only for live trading mode
-            current_creds = config.get_current_alpaca_credentials()
-            if not current_creds['paper_trading'] and not config.LIVE_TRADING_ALLOWED:
-                error_msg = f"LIVE TRADING BLOCKED: {func.__name__} cannot execute live trades (LIVE_TRADING_ALLOWED=false)"
-                logger.error(f"❌ {error_msg}")
-                raise TradingSafetyError(error_msg)
-        
-        # Check if we're trying to prevent live trading in tests
-        current_creds = config.get_current_alpaca_credentials()
-        if config.PREVENT_LIVE_TRADING_IN_TESTS and not current_creds['paper_trading']:
-            error_msg = f"LIVE TRADING BLOCKED: {func.__name__} cannot execute live trades (PREVENT_LIVE_TRADING_IN_TESTS=true)"
-            logger.error(f"❌ {error_msg}")
-            raise TradingSafetyError(error_msg)
-        
-        # Check if live trading is not allowed (only for live trading mode)
-        current_creds = config.get_current_alpaca_credentials()
-        if not current_creds['paper_trading'] and not config.LIVE_TRADING_ALLOWED:
-            error_msg = f"LIVE TRADING BLOCKED: {func.__name__} cannot execute live trades (LIVE_TRADING_ALLOWED=false)"
-            logger.error(f"❌ {error_msg}")
-            raise TradingSafetyError(error_msg)
-        
-        # If we get here, trading is allowed
-        logger.debug(f"✅ Trading safety check passed for {func.__name__}")
-        return func(*args, **kwargs)
+            if config.TESTING_MODE:
+                # In testing mode - only allow paper trading
+                if not paper_trading:
+                    error_msg = f"LIVE TRADING BLOCKED: {func.__name__} cannot execute live trades in testing mode"
+                    logger.error(f"❌ {error_msg}")
+                    raise TradingSafetyError(error_msg)
+                else:
+                    logger.debug(f"✅ Paper trading allowed in testing mode for {func.__name__}")
+            else:
+                # In production mode - live trading allowed
+                logger.debug(f"✅ Production mode - live trading allowed for {func.__name__}")
+            
+            # If we get here, trading is allowed
+            return func(*args, **kwargs)
+            
+        except Exception as e:
+            if isinstance(e, TradingSafetyError):
+                raise
+            logger.error(f"❌ Error in trading safety check for {func.__name__}: {e}")
+            raise TradingSafetyError(f"Trading safety check failed: {str(e)}")
     
     return wrapper
 
@@ -94,8 +89,8 @@ def require_live_trading(func: Callable) -> Callable:
             logger.error(f"❌ {error_msg}")
             raise TradingSafetyError(error_msg)
         
-        if not config.LIVE_TRADING_ALLOWED:
-            error_msg = f"LIVE TRADING BLOCKED: {func.__name__} cannot execute live trades (LIVE_TRADING_ALLOWED=false)"
+        if config.TESTING_MODE:
+            error_msg = f"LIVE TRADING BLOCKED: {func.__name__} cannot execute live trades in testing mode"
             logger.error(f"❌ {error_msg}")
             raise TradingSafetyError(error_msg)
         
@@ -104,52 +99,31 @@ def require_live_trading(func: Callable) -> Callable:
     
     return wrapper
 
-def safe_trading_mode(func: Callable) -> Callable:
+def get_trading_safety_status() -> Dict[str, Any]:
     """
-    Decorator to ensure safe trading mode based on configuration.
-    
-    This decorator automatically chooses the appropriate safety level:
-    - If in testing mode: applies prevent_live_trading_in_tests
-    - If paper trading: allows execution
-    - If live trading: checks LIVE_TRADING_ALLOWED
-    """
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        # Apply the appropriate safety check
-        if config.TESTING_MODE:
-            # In testing mode, be extra careful
-            current_creds = config.get_current_alpaca_credentials()
-            if config.PREVENT_LIVE_TRADING_IN_TESTS and not current_creds['paper_trading']:
-                error_msg = f"TESTING MODE: {func.__name__} blocked - live trading not allowed during tests"
-                logger.error(f"❌ {error_msg}")
-                raise TradingSafetyError(error_msg)
-        
-        # Check live trading permissions
-        current_creds = config.get_current_alpaca_credentials()
-        if not current_creds['paper_trading'] and not config.LIVE_TRADING_ALLOWED:
-            error_msg = f"TRADING BLOCKED: {func.__name__} cannot execute trades (LIVE_TRADING_ALLOWED=false)"
-            logger.error(f"❌ {error_msg}")
-            raise TradingSafetyError(error_msg)
-        
-        logger.debug(f"✅ Safe trading check passed for {func.__name__}")
-        return func(*args, **kwargs)
-    
-    return wrapper
-
-def get_trading_safety_status() -> dict:
-    """
-    Get the current trading safety status.
+    Get comprehensive trading safety status.
     
     Returns:
-        dict: Current safety configuration and status
+        Dict containing current safety configuration and status.
     """
-    current_creds = config.get_current_alpaca_credentials()
-    return {
-        'paper_trading_enabled': current_creds['paper_trading'],
-        'testing_mode': config.TESTING_MODE,
-        'live_trading_allowed': config.LIVE_TRADING_ALLOWED,
-        'prevent_live_trading_in_tests': config.PREVENT_LIVE_TRADING_IN_TESTS,
-        'current_mode': 'PAPER' if current_creds['paper_trading'] else 'LIVE',
-        'trading_allowed': current_creds['paper_trading'] or config.LIVE_TRADING_ALLOWED,
-        'safety_level': 'HIGH' if config.TESTING_MODE else 'NORMAL'
-    }
+    try:
+        current_creds = config.get_current_alpaca_credentials()
+        
+        return {
+            'testing_mode': config.TESTING_MODE,
+            'paper_trading': current_creds['paper_trading'],
+            'live_trading': not current_creds['paper_trading'],
+            'safety_level': 'HIGH' if config.TESTING_MODE else 'NORMAL',
+            'trading_allowed': current_creds['paper_trading'] or not config.TESTING_MODE,
+            'live_trading_allowed': not config.TESTING_MODE and not current_creds['paper_trading'],
+            'paper_trading_allowed': current_creds['paper_trading'],
+            'description': 'Safe mode - paper trading only' if config.TESTING_MODE else 'Production mode - live trading allowed'
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting trading safety status: {e}")
+        return {
+            'error': str(e),
+            'testing_mode': config.TESTING_MODE,
+            'safety_level': 'UNKNOWN'
+        }

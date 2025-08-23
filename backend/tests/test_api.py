@@ -21,24 +21,35 @@ class TestAPI:
         with patch('api.app.database') as mock_db, \
              patch('api.app.alpaca_client') as mock_alpaca, \
              patch('api.app.earnings_scanner') as mock_scanner, \
-             patch('api.app.trading_scheduler') as mock_scheduler:
+             patch('api.app.get_trading_scheduler') as mock_get_scheduler:
             
-            # Configure mocks
+            # Configure database mocks
             mock_db.get_setting.return_value = "true"
             mock_db.set_setting.return_value = True
             mock_db.get_selected_trades.return_value = []
             mock_db.get_trade_selections.return_value = []
             
+            # Configure alpaca client mocks
             mock_alpaca.get_account_info.return_value = {"account_number": "123"}
             mock_alpaca.get_positions.return_value = []
             mock_alpaca.get_trade_activities.return_value = []
             
+            # Configure scanner mocks
             mock_scanner.get_earnings_for_scanning.return_value = []
             
-            mock_scheduler.get_scheduler_status.return_value = {"status": "running"}
+            # Create and configure scheduler mock
+            mock_scheduler = Mock()
+            mock_scheduler.get_scheduler_status.return_value = {"running": True, "jobs": [], "job_count": 0}
+            mock_scheduler.start.return_value = True
+            mock_scheduler.stop.return_value = True
             mock_scheduler.database = mock_db
+            mock_scheduler.trade_executor = Mock()
+            mock_scheduler.trade_executor.execute_specific_trade.return_value = {"success": True}
             
-            # Import and create client after mocking
+            # Configure the get_trading_scheduler mock
+            mock_get_scheduler.return_value = mock_scheduler
+            
+            # Import app after mocking
             from api.app import app
             self.client = TestClient(app)
 
@@ -76,28 +87,47 @@ class TestAPI:
     @pytest.mark.api
     def test_update_setting(self):
         """Test updating a setting."""
-        setting_data = {"key": "auto_trading_enabled", "value": "true"}
-        response = self.client.put("/settings", json=setting_data)
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] is True
+        with patch('api.app.get_trading_scheduler') as mock_get_scheduler:
+            # Create mock scheduler
+            mock_scheduler = Mock()
+            mock_scheduler.database = Mock()
+            mock_scheduler.database.set_setting.return_value = True
+            mock_get_scheduler.return_value = mock_scheduler
+            
+            setting_data = {"key": "auto_trading_enabled", "value": "true"}
+            response = self.client.put("/settings", json=setting_data)
+            assert response.status_code == 200
+            data = response.json()
+            assert data["success"] is True
 
     @pytest.mark.unit
     @pytest.mark.api
     def test_get_scheduler_status(self):
         """Test getting scheduler status."""
-        response = self.client.get("/scheduler/status")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] is True
-        assert "data" in data
+        with patch('api.app.get_trading_scheduler') as mock_get_scheduler:
+            # Create mock scheduler
+            mock_scheduler = Mock()
+            mock_scheduler.get_scheduler_status.return_value = {"running": True, "jobs": [], "job_count": 0}
+            mock_get_scheduler.return_value = mock_scheduler
+            
+            response = self.client.get("/scheduler/status")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["success"] is True
+            assert "data" in data
 
     @pytest.mark.unit
     @pytest.mark.api
     def test_start_scheduler(self):
         """Test starting scheduler."""
-        response = self.client.post("/scheduler/start")
-        assert response.status_code == 200
+        with patch('api.app.get_trading_scheduler') as mock_get_scheduler:
+            # Create mock scheduler
+            mock_scheduler = Mock()
+            mock_scheduler.start.return_value = True
+            mock_get_scheduler.return_value = mock_scheduler
+            
+            response = self.client.post("/scheduler/start")
+            assert response.status_code == 200
 
     @pytest.mark.unit
     @pytest.mark.api
@@ -151,10 +181,16 @@ class TestAPI:
     @pytest.mark.api
     def test_stop_scheduler(self):
         """Test stopping scheduler."""
-        response = self.client.post("/scheduler/stop")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] is True
+        with patch('api.app.get_trading_scheduler') as mock_get_scheduler:
+            # Create mock scheduler
+            mock_scheduler = Mock()
+            mock_scheduler.stop.return_value = True
+            mock_get_scheduler.return_value = mock_scheduler
+            
+            response = self.client.post("/scheduler/stop")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["success"] is True
 
     @pytest.mark.unit
     @pytest.mark.api
@@ -170,11 +206,18 @@ class TestAPI:
     @pytest.mark.api
     def test_get_trade_selections(self):
         """Test getting trade selections."""
-        response = self.client.get("/trades/selections")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] is True
-        assert "data" in data
+        with patch('api.app.get_trading_scheduler') as mock_get_scheduler:
+            # Create mock scheduler
+            mock_scheduler = Mock()
+            mock_scheduler.database = Mock()
+            mock_scheduler.database.get_trade_selections.return_value = []
+            mock_get_scheduler.return_value = mock_scheduler
+            
+            response = self.client.get("/trades/selections")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["success"] is True
+            assert "data" in data
 
     @pytest.mark.unit
     @pytest.mark.api
@@ -190,18 +233,7 @@ class TestAPI:
         data = response.json()
         assert "success" in data
 
-    @pytest.mark.unit
-    @pytest.mark.api
-    def test_execute_specific_trade(self):
-        """Test executing a specific trade."""
-        with patch('api.app.trading_scheduler') as mock_scheduler:
-            mock_scheduler.database.get_trade.return_value = {"id": "test_trade"}
-            mock_scheduler.trade_executor.execute_specific_trade.return_value = {"success": True}
-            
-            response = self.client.post("/trades/execute/test_trade")
-            assert response.status_code == 200
-            data = response.json()
-            assert "success" in data
+
 
     @pytest.mark.unit
     @pytest.mark.api
@@ -294,6 +326,13 @@ class TestAPI:
         assert response.status_code == 422
         
         # Test with valid data
-        setting_data = {"key": "auto_trading_enabled", "value": "true"}
-        response = self.client.put("/settings", json=setting_data)
-        assert response.status_code == 200
+        with patch('api.app.get_trading_scheduler') as mock_get_scheduler:
+            # Create mock scheduler
+            mock_scheduler = Mock()
+            mock_scheduler.database = Mock()
+            mock_scheduler.database.set_setting.return_value = True
+            mock_get_scheduler.return_value = mock_scheduler
+            
+            setting_data = {"key": "auto_trading_enabled", "value": "true"}
+            response = self.client.put("/settings", json=setting_data)
+            assert response.status_code == 200

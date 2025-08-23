@@ -238,9 +238,10 @@ API_TIMEOUT = int(os.getenv("API_TIMEOUT", "300"))  # 5 minutes in seconds
 FINNHUB_TIMEOUT = int(os.getenv("FINNHUB_TIMEOUT", "30"))  # 30 seconds for Finnhub
 
 # Test Configuration
-TESTING_MODE = os.getenv("TESTING_MODE", "false").lower() == "true"
-LIVE_TRADING_ALLOWED = os.getenv("LIVE_TRADING_ALLOWED", "false").lower() == "true"
-PREVENT_LIVE_TRADING_IN_TESTS = os.getenv("PREVENT_LIVE_TRADING_IN_TESTS", "true").lower() == "true"
+TESTING_MODE = os.getenv("TESTING_MODE", "true").lower() == "true"  # Default to safe mode (true)
+# Removed: LIVE_TRADING_ALLOWED and PREVENT_LIVE_TRADING_IN_TESTS - consolidated into TESTING_MODE
+# TESTING_MODE = true: Safe mode (paper trading only, blocks live trading)
+# TESTING_MODE = false: Production mode (allows live trading if user explicitly enables it)
 
 # Filter Weights for Scoring
 FILTER_WEIGHTS = {

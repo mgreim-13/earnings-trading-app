@@ -216,10 +216,9 @@ def main():
     # Create test directories
     create_test_directories()
     
-    # Set environment variables for testing
+    # Set testing environment variables
     os.environ['TESTING_MODE'] = 'true'
-    os.environ['PREVENT_LIVE_TRADING_IN_TESTS'] = 'true'
-    os.environ['LIVE_TRADING_ALLOWED'] = 'false'
+    # Removed: LIVE_TRADING_ALLOWED and PREVENT_LIVE_TRADING_IN_TESTS - consolidated into TESTING_MODE
     
     success = True
     

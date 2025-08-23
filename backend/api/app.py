@@ -171,7 +171,7 @@ try:
     database = Database()
     alpaca_client = get_alpaca_client()  # Use the function instead of direct assignment
     earnings_scanner = EarningsScanner()
-    trading_scheduler = TradingScheduler()
+    # Note: trading_scheduler is initialized in main.py, not here
     logger.info("All components initialized successfully")
 except Exception as e:
     logger.error(f"Failed to initialize components: {e}")
@@ -194,25 +194,20 @@ class TradeSelectionRequest(BaseModel):
 
 
 
-# Startup event
-@app.on_event("startup")
-async def startup_event():
-    """Start the trading scheduler on application startup."""
-    try:
-        trading_scheduler.start()
-        logger.info("Trading scheduler started on startup")
-    except Exception as e:
-        logger.error(f"Failed to start scheduler on startup: {e}")
+# Global scheduler reference - will be set by main.py
+_trading_scheduler = None
 
-# Shutdown event
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Stop the trading scheduler on application shutdown."""
-    try:
-        trading_scheduler.stop()
-        logger.info("Trading scheduler stopped on shutdown")
-    except Exception as e:
-        logger.error(f"Failed to stop scheduler on shutdown: {e}")
+def set_trading_scheduler(scheduler):
+    """Set the global trading scheduler reference."""
+    global _trading_scheduler
+    _trading_scheduler = scheduler
+
+def get_trading_scheduler():
+    """Get the global trading scheduler reference."""
+    global _trading_scheduler
+    if _trading_scheduler is None:
+        raise RuntimeError("Trading scheduler not initialized. Call set_trading_scheduler() first.")
+    return _trading_scheduler
 
 # Health check endpoint
 @app.get("/health")
@@ -534,9 +529,9 @@ async def get_upcoming_earnings_with_scan():
                 # Auto-select stocks with score >= 80 (unless manually deselected)
                 if total_score >= 80:
                     # Check if this stock has been manually deselected
-                    if not trading_scheduler.database.is_manually_deselected(symbol, earnings_date):
+                    if not get_trading_scheduler().database.is_manually_deselected(symbol, earnings_date):
                         # Auto-select the stock
-                        success = trading_scheduler.database.set_trade_selection(symbol, earnings_date, True)
+                        success = get_trading_scheduler().database.set_trade_selection(symbol, earnings_date, True)
                         if success:
                             auto_selected_count += 1
                             logger.info(f"🎯 Auto-selected {symbol} (score: {total_score}) for {earnings_date}")
@@ -637,10 +632,10 @@ async def update_setting(setting: SettingUpdate):
         # Automatically control scheduler when auto_trading_enabled changes
         if setting.key == 'auto_trading_enabled':
             if setting.value.lower() in ['true', '1', 'yes', 'on']:
-                trading_scheduler.start()
+                get_trading_scheduler().start()
                 logger.info("Automated trading enabled - scheduler started automatically")
             else:
-                trading_scheduler.stop()
+                get_trading_scheduler().stop()
                 logger.info("Automated trading disabled - scheduler stopped automatically")
         
         # Automatically recreate Alpaca client when paper_trading_enabled changes
@@ -669,7 +664,7 @@ async def get_raw_earnings_data():
     """Get the raw earnings data that the scanner is finding."""
     try:
         # Get earnings scanner instance
-        earnings_scanner = trading_scheduler.earnings_scanner
+        earnings_scanner = get_trading_scheduler().earnings_scanner
         
         # Get the raw earnings data
         tomorrow_earnings = earnings_scanner.get_tomorrow_earnings()
@@ -813,11 +808,11 @@ async def select_stock_for_execution(selection: TradeSelectionRequest):
         if selection.is_selected:
             # User is selecting the stock
             logger.info(f"🔍 User selecting {selection.ticker} for {selection.earnings_date}")
-            success = trading_scheduler.database.set_trade_selection(selection.ticker, selection.earnings_date, True)
+            success = get_trading_scheduler().database.set_trade_selection(selection.ticker, selection.earnings_date, True)
         else:
             # User is deselecting the stock - mark as manually deselected to prevent auto-selection
             logger.info(f"🔍 User deselecting {selection.ticker} for {selection.earnings_date} - marking as manually deselected")
-            success = trading_scheduler.database.manually_deselect_stock(selection.ticker, selection.earnings_date)
+            success = get_trading_scheduler().database.manually_deselect_stock(selection.ticker, selection.earnings_date)
         
         if success:
             logger.info(f"✅ Trade selection updated: {selection.ticker} {'selected' if selection.is_selected else 'deselected'} for {selection.earnings_date}")
@@ -825,7 +820,7 @@ async def select_stock_for_execution(selection: TradeSelectionRequest):
             # Verify the update by querying the database
             logger.info(f"🔍 Verifying database update for {selection.ticker}...")
             try:
-                selections = trading_scheduler.database.get_trade_selections()
+                selections = get_trading_scheduler().database.get_trade_selections()
                 logger.info(f"🔍 All trade selections after update: {selections}")
                 
                 # Find our specific selection
@@ -857,48 +852,14 @@ async def select_stock_for_execution(selection: TradeSelectionRequest):
             "error": str(e)
         }
 
-@app.post("/trades/execute/{trade_id}")
-async def execute_specific_trade(trade_id: str):
-    """Execute a specific trade by ID."""
-    try:
-        # Validate input
-        if not trade_id:
-            raise HTTPException(status_code=400, detail="Trade ID is required")
-        
-        logger.info(f"Executing specific trade: {trade_id}")
-        
-        # Get trade details from database
-        trade = trading_scheduler.database.get_trade(trade_id)
-        if not trade:
-            raise HTTPException(status_code=404, detail=f"Trade {trade_id} not found")
-        
-        # Execute the trade
-        result = await trading_scheduler.trade_executor.execute_specific_trade(trade)
-        
-        if result.get('success'):
-            return {
-                "success": True,
-                "message": f"Trade {trade_id} executed successfully",
-                "trade_data": result
-            }
-        else:
-            return {
-                "success": False,
-                "error": result.get('message', 'Unknown error')
-            }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to execute trade {trade_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+
 
 # Scheduler management endpoints
 @app.get("/scheduler/status")
 async def get_scheduler_status():
     """Get current scheduler status and job information."""
     try:
-        status = trading_scheduler.get_scheduler_status()
+        status = get_trading_scheduler().get_scheduler_status()
         return {
             "success": True,
             "data": status
@@ -911,7 +872,7 @@ async def get_scheduler_status():
 async def start_scheduler():
     """Start the trading scheduler."""
     try:
-        trading_scheduler.start()
+        get_trading_scheduler().start()
         return {
             "success": True,
             "message": "Trading scheduler started successfully"
@@ -924,7 +885,7 @@ async def start_scheduler():
 async def stop_scheduler():
     """Stop the trading scheduler."""
     try:
-        trading_scheduler.stop()
+        get_trading_scheduler().stop()
         return {
             "success": True,
             "message": "Trading scheduler stopped successfully"
@@ -1035,7 +996,7 @@ async def calculate_calendar_spread(symbol: str, short_exp: str, long_exp: str, 
 async def get_trade_selections():
     """Get all current trade selections."""
     try:
-        selections = trading_scheduler.database.get_trade_selections()
+        selections = get_trading_scheduler().database.get_trade_selections()
         return {
             "success": True,
             "data": selections
@@ -1051,8 +1012,8 @@ async def get_trade_selections():
 async def get_trade_selection_stats():
     """Get statistics about trade selections."""
     try:
-        all_selections = trading_scheduler.database.get_trade_selections()
-        selected_trades = trading_scheduler.database.get_selected_trades()
+        all_selections = get_trading_scheduler().database.get_trade_selections()
+        selected_trades = get_trading_scheduler().database.get_selected_trades()
         
         stats = {
             "total_selections": len(all_selections),
@@ -1079,7 +1040,7 @@ async def get_trade_selection_stats():
 async def clear_all_trade_selections():
     """Clear all trade selections (for testing/reset purposes)."""
     try:
-        success = trading_scheduler.database.clear_all_trade_selections()
+        success = get_trading_scheduler().database.clear_all_trade_selections()
         if success:
             return {
                 "success": True,
@@ -1101,7 +1062,7 @@ async def clear_all_trade_selections():
 async def clear_manually_deselected_stocks():
     """Clear manually deselected flags (for testing/reset purposes)."""
     try:
-        success = trading_scheduler.database.clear_manually_deselected_stocks()
+        success = get_trading_scheduler().database.clear_manually_deselected_stocks()
         if success:
             return {
                 "success": True,

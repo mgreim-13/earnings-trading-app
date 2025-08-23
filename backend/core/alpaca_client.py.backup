@@ -661,19 +661,39 @@ class AlpacaClient:
                 short_call_symbol, long_call_symbol, quantity, order_type, price_info['limit_price']
             )
             
-            # Place order using SDK for multi-leg orders
+            # Place order using raw HTTP API for multi-leg orders
             try:
-                logger.info(f"Submitting calendar spread order via SDK for {symbol}")
-                order = self.trading_client.submit_order(order_data)
+                # Get the base URL for the trading API from config
+                credentials = config.get_current_alpaca_credentials()
+                base_url = credentials['base_url']
+                url = f"{base_url}/v2/orders"
                 
-                if order:
-                    logger.info(f"Multi-leg order submitted successfully via SDK: {order.id}")
+                headers = {
+                    "accept": "application/json",
+                    "content-type": "application/json",
+                    "Apca-Api-Key-Id": self.api_key,
+                    "Apca-Api-Secret-Key": self.secret_key
+                }
+                
+                # Submit the order
+                response = requests.post(url, headers=headers, json=order_data)
+                response.raise_for_status()
+                
+                order_data_response = response.json()
+                order_id = order_data_response.get('id')
+                
+                if order_id:
+                    logger.info(f"Multi-leg order submitted successfully: {order_id}")
+                    order = type('Order', (), {
+                        'id': order_id,
+                        'status': order_data_response.get('status', 'new')
+                    })()
                 else:
-                    logger.error(f"Failed to submit order via SDK")
+                    logger.error(f"Failed to get order ID from response: {order_data_response}")
                     return None
                     
             except Exception as e:
-                logger.error(f"Failed to submit multi-leg order via SDK: {e}")
+                logger.error(f"Failed to submit multi-leg order via HTTP API: {e}")
                 return None
             
             if order:
@@ -714,47 +734,53 @@ class AlpacaClient:
     def _create_calendar_spread_order_data(self, short_symbol: str, long_symbol: str, 
                                          quantity: int, order_type: str, limit_price: float = None):
         """Create the order data structure for calendar spread orders."""
-        # Import here to avoid circular imports
-        from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, OptionLegRequest
-        from alpaca.trading.enums import OrderSide, PositionIntent, TimeInForce, OrderClass
-        
-        # Create the legs using OptionLegRequest objects
-        legs = [
-            OptionLegRequest(
-                symbol=short_symbol,
-                ratio_qty=1.0,
-                side=OrderSide.SELL,
-                position_intent=PositionIntent.SELL_TO_OPEN
-            ),
-            OptionLegRequest(
-                symbol=long_symbol,
-                ratio_qty=1.0,
-                side=OrderSide.BUY,
-                position_intent=PositionIntent.BUY_TO_OPEN
-            )
-        ]
-        
         if order_type == "limit" and limit_price:
-            # For limit orders, create a proper LimitOrderRequest
-            return LimitOrderRequest(
-                symbol="",  # Not needed for mleg orders
-                qty=quantity,
-                side=None,  # Not needed for mleg orders
-                time_in_force=TimeInForce.DAY,
-                order_class=OrderClass.MLEG,
-                legs=legs,
-                limit_price=limit_price
-            )
+            # For limit orders, we need to use the raw dictionary format for multi-leg orders
+            order_data = {
+                "order_class": "mleg",
+                "qty": quantity,
+                "type": "limit",
+                "limit_price": limit_price,
+                "time_in_force": "day",
+                "legs": [
+                    {
+                        "symbol": short_symbol,
+                        "ratio_qty": "1",
+                        "side": "sell",
+                        "position_intent": "sell_to_open"
+                    },
+                    {
+                        "symbol": long_symbol,
+                        "ratio_qty": "1",
+                        "side": "buy",
+                        "position_intent": "buy_to_open"
+                    }
+                ]
+            }
+            return order_data
         else:
-            # For market orders, create a proper MarketOrderRequest
-            return MarketOrderRequest(
-                symbol="",  # Not needed for mleg orders
-                qty=quantity,
-                side=None,  # Not needed for mleg orders
-                time_in_force=TimeInForce.DAY,
-                order_class=OrderClass.MLEG,
-                legs=legs
-            )
+            # For market orders, use the raw dictionary format
+            order_data = {
+                "order_class": "mleg",
+                "qty": quantity,
+                "type": "market",
+                "time_in_force": "day",
+                "legs": [
+                    {
+                        "symbol": short_symbol,
+                        "ratio_qty": "1",
+                        "side": "sell",
+                        "position_intent": "sell_to_open"
+                    },
+                    {
+                        "symbol": long_symbol,
+                        "ratio_qty": "1",
+                        "side": "buy",
+                        "position_intent": "buy_to_open"
+                    }
+                ]
+            }
+            return order_data
 
     # Position management methods
     @safe_trading_mode
@@ -1320,7 +1346,7 @@ class AlpacaClient:
 
     @safe_trading_mode
     def close_calendar_spread(self, symbol: str, short_exp: str, long_exp: str, 
-                             option_type: str = 'call', quantity: int = 1, order_type: str = 'limit') -> Optional[Dict]:
+                             option_type: str = 'call', quantity: int = 1) -> Optional[Dict]:
         """Close a calendar spread position."""
         # Validate inputs
         if not symbol or not short_exp or not long_exp:
@@ -1333,10 +1359,6 @@ class AlpacaClient:
         
         if not isinstance(quantity, int) or quantity <= 0:
             logger.error("Quantity must be a positive integer")
-            return None
-        
-        if order_type not in ['limit', 'market']:
-            logger.error("Order type must be 'limit' or 'market'")
             return None
         
         # Validate date format (basic check)
@@ -1384,12 +1406,13 @@ class AlpacaClient:
                 logger.error(f"Could not find suitable call options")
                 return None
             
-            # Create close order data
+            # Create close order
             close_order_data = {
                 "order_class": "mleg",
                 "qty": quantity,
-                "type": order_type,  # FIXED: Use order_type parameter instead of hardcoded "limit"
+                "type": "limit",
                 "time_in_force": "day",
+                "limit_price": exit_price,
                 "legs": [
                     {
                         "symbol": short_call_symbol,
@@ -1403,10 +1426,6 @@ class AlpacaClient:
                     }
                 ]
             }
-            
-            # Add limit price only for limit orders
-            if order_type == "limit":
-                close_order_data["limit_price"] = exit_price
             
             order = self.trading_client.submit_order(close_order_data)
             

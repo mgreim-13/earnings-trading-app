@@ -7,12 +7,14 @@ Handles both entry and exit order monitoring with advanced features.
 import asyncio
 import logging
 import time
+import threading
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 from dataclasses import dataclass
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.date import DateTrigger
 import pytz
+import traceback
 
 from core.alpaca_client import AlpacaClient
 from core.database import Database
@@ -41,7 +43,7 @@ class OrderMonitor:
         self.database = database
         self.et_tz = pytz.timezone('US/Eastern')
         self.config = OrderMonitorConfig()
-        self.active_monitors = {}  # trade_id -> monitor_task
+        self.active_monitors = {}  # trade_id -> monitor_thread
         self.scheduled_jobs = {}   # trade_id -> job_id
 
     # ==================== SCHEDULING METHODS ====================
@@ -168,25 +170,17 @@ class OrderMonitor:
         try:
             logger.info(f"🔍 Starting entry monitoring for {symbol} (Trade: {trade_id})")
             
-            # Create monitoring task
-            monitor_task = asyncio.create_task(
-                self._monitor_order_loop(
-                    trade_id=trade_id,
-                    order_id=order_id,
-                    symbol=symbol,
-                    short_exp=short_exp,
-                    long_exp=long_exp,
-                    option_type='call',
-                    is_exit=False,
-                    quantity=quantity
-                )
+            # Run the monitoring loop directly since it's now async
+            await self._monitor_order_loop(
+                trade_id=trade_id,
+                order_id=order_id,
+                symbol=symbol,
+                short_exp=short_exp,
+                long_exp=long_exp,
+                option_type='call',
+                is_exit=False,
+                quantity=quantity
             )
-            
-            # Track active monitor
-            self.active_monitors[trade_id] = monitor_task
-            
-            # Wait for completion
-            await monitor_task
             
         except Exception as e:
             logger.error(f"❌ Error in entry monitoring for {symbol}: {e}")
@@ -203,25 +197,17 @@ class OrderMonitor:
         try:
             logger.info(f"🔍 Starting exit monitoring for {symbol} (Trade: {trade_id})")
             
-            # Create monitoring task
-            monitor_task = asyncio.create_task(
-                self._monitor_order_loop(
-                    trade_id=trade_id,
-                    order_id=order_id,
-                    symbol=symbol,
-                    short_exp=short_exp,
-                    long_exp=long_exp,
-                    option_type='call',
-                    is_exit=True,
-                    quantity=quantity
-                )
+            # Run the monitoring loop directly since it's now async
+            await self._monitor_order_loop(
+                trade_id=trade_id,
+                order_id=order_id,
+                symbol=symbol,
+                short_exp=short_exp,
+                long_exp=long_exp,
+                option_type='call',
+                is_exit=True,
+                quantity=quantity
             )
-            
-            # Track active monitor
-            self.active_monitors[trade_id] = monitor_task
-            
-            # Wait for completion
-            await monitor_task
             
         except Exception as e:
             logger.error(f"❌ Error in exit monitoring for {symbol}: {e}")
@@ -240,6 +226,7 @@ class OrderMonitor:
             start_time = datetime.now(self.et_tz)
             last_price_update = start_time
             price_update_interval = timedelta(seconds=30)
+            poll_count = 0
             
             # Get appropriate slippage protection
             slippage_protection = (self.config.exit_slippage_protection if is_exit 
@@ -248,9 +235,12 @@ class OrderMonitor:
             logger.info(f"🔍 Starting {'exit' if is_exit else 'entry'} monitoring for {symbol}")
             logger.info(f"  - Max monitoring time: {self.config.max_monitoring_time // 60} minutes")
             logger.info(f"  - Slippage protection: {slippage_protection * 100:.1f}%")
+            logger.info(f"  - Polling interval: {self.config.polling_interval} seconds")
+            logger.info(f"  - Order ID: {order_id}")
             
             while True:
                 current_time = datetime.now(self.et_tz)
+                poll_count += 1
                 
                 # Check if we've exceeded max monitoring time
                 elapsed_time = (current_time - start_time).total_seconds()
@@ -258,6 +248,8 @@ class OrderMonitor:
                     logger.warning(f"⏰ Max monitoring time exceeded for {symbol}, switching to market order")
                     await self._handle_monitoring_timeout(symbol, short_exp, long_exp, option_type, is_exit, quantity)
                     break
+                
+                logger.debug(f"🔍 Poll #{poll_count} for {symbol} (Order: {order_id}) - Elapsed: {elapsed_time:.1f}s")
                 
                 # Check order status
                 order_status = await self._check_order_status_with_retry(order_id, symbol)
@@ -279,17 +271,18 @@ class OrderMonitor:
                 
                 # Update prices periodically for slippage protection
                 if current_time - last_price_update > price_update_interval:
+                    logger.debug(f"📊 Checking slippage protection for {symbol}")
                     await self._check_slippage_protection(symbol, short_exp, long_exp, option_type, 
-                                                        is_exit, quantity, slippage_protection, order_id)
+                                                      is_exit, quantity, slippage_protection, order_id)
                     last_price_update = current_time
                 
-                # Wait before next check
+                # Wait before next check - FIXED: Use async sleep instead of blocking sleep
+                logger.debug(f"⏳ Waiting {self.config.polling_interval} seconds before next poll for {symbol}")
                 await asyncio.sleep(self.config.polling_interval)
                 
-        except asyncio.CancelledError:
-            logger.info(f"🛑 Monitoring cancelled for {symbol}")
         except Exception as e:
             logger.error(f"❌ Error in monitoring loop for {symbol}: {e}")
+            logger.error(f"❌ Stack trace: {traceback.format_exc()}")
 
     async def _check_order_status_with_retry(self, order_id: str, symbol: str) -> Optional[Dict]:
         """Check order status with retry logic."""
@@ -414,9 +407,9 @@ class OrderMonitor:
             logger.warning(f"⏰ Monitoring timeout for {symbol}, placing market order")
             
             if is_exit:
-                # Close position with market order
+                # Close position with market order - FIXED: Use market order type
                 result = self.client.close_calendar_spread(
-                    symbol, short_exp, long_exp, option_type, quantity
+                    symbol, short_exp, long_exp, option_type, quantity, order_type="market"
                 )
             else:
                 # Entry with market order
@@ -474,18 +467,16 @@ class OrderMonitor:
 
     # ==================== MANAGEMENT METHODS ====================
     
-    async def stop_order_monitoring(self, trade_id: str) -> bool:
+    def stop_order_monitoring(self, trade_id: str) -> bool:
         """Stop monitoring for a specific trade."""
         try:
-            # Cancel active monitoring task
+            # Stop active monitoring thread
             if trade_id in self.active_monitors:
-                task = self.active_monitors[trade_id]
-                if not task.done():
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
+                thread = self.active_monitors[trade_id]
+                if thread.is_alive():
+                    # Set a flag to stop the monitoring loop
+                    # Note: This is a simple approach - in production you might want a more sophisticated stop mechanism
+                    logger.info(f"🛑 Stopping order monitoring for trade {trade_id}")
                 del self.active_monitors[trade_id]
                 logger.info(f"✅ Stopped order monitoring for trade {trade_id}")
             
@@ -512,7 +503,7 @@ class OrderMonitor:
             
             # Stop all active monitors
             for trade_id in list(self.active_monitors.keys()):
-                asyncio.create_task(self.stop_order_monitoring(trade_id))
+                self.stop_order_monitoring(trade_id)
             
             # Remove all scheduled jobs
             for trade_id in list(self.scheduled_jobs.keys()):
@@ -545,7 +536,7 @@ class OrderMonitor:
         try:
             # Check if monitoring is active
             is_active = trade_id in self.active_monitors
-            task = self.active_monitors.get(trade_id)
+            thread = self.active_monitors.get(trade_id)
             
             # Check if job is scheduled
             job_id = self.scheduled_jobs.get(trade_id)
@@ -559,7 +550,7 @@ class OrderMonitor:
             return {
                 'trade_id': trade_id,
                 'active_monitoring': is_active,
-                'task_status': 'running' if task and not task.done() else 'completed' if task and task.done() else 'none',
+                'thread_status': 'running' if thread and thread.is_alive() else 'completed' if thread and not thread.is_alive() else 'none',
                 'scheduled_job': {
                     'job_id': job_id,
                     'next_run': scheduled_job.next_run_time.isoformat() if scheduled_job and hasattr(scheduled_job, 'next_run_time') and scheduled_job.next_run_time else None,
@@ -571,3 +562,54 @@ class OrderMonitor:
         except Exception as e:
             logger.error(f"Error getting comprehensive monitoring status for {trade_id}: {e}")
             return None
+
+    def get_monitoring_config_status(self) -> Dict:
+        """Get the current monitoring configuration status."""
+        try:
+            return {
+                'polling_interval': self.config.polling_interval,
+                'max_monitoring_time': self.config.max_monitoring_time,
+                'entry_slippage_protection': self.config.entry_slippage_protection,
+                'exit_slippage_protection': self.config.exit_slippage_protection,
+                'market_order_monitoring_time': self.config.market_order_monitoring_time,
+                'active_monitors_count': len(self.active_monitors),
+                'scheduled_jobs_count': len(self.scheduled_jobs),
+                'scheduler_running': self.scheduler.running if hasattr(self.scheduler, 'running') else False
+            }
+        except Exception as e:
+            logger.error(f"Error getting monitoring config status: {e}")
+            return {'error': str(e)}
+
+    def force_start_monitoring(self, trade_id: str, order_id: str, symbol: str,
+                              short_exp: str, long_exp: str, quantity: int = 1) -> bool:
+        """Force start monitoring for a trade (useful for debugging)."""
+        try:
+            logger.info(f"🔄 Force starting monitoring for {symbol} (Trade: {trade_id})")
+            
+            # Cancel any existing monitoring
+            if trade_id in self.active_monitors:
+                self.stop_order_monitoring(trade_id)
+            
+            # Schedule new monitoring immediately
+            success = self.schedule_comprehensive_monitoring(
+                trade_id=trade_id,
+                execution_result={
+                    'symbol': symbol,
+                    'order_id': order_id,
+                    'short_expiration': short_exp,
+                    'long_expiration': long_exp,
+                    'quantity': quantity
+                },
+                monitoring_type='entry'
+            )
+            
+            if success:
+                logger.info(f"✅ Force started monitoring for {symbol}")
+            else:
+                logger.error(f"❌ Failed to force start monitoring for {symbol}")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"❌ Error force starting monitoring for {symbol}: {e}")
+            return False

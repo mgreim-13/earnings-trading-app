@@ -604,7 +604,7 @@ const UpcomingEarnings = () => {
             </Typography>
           </Alert>
           
-          {/* Trade Execution Controls */}
+          {/* Trade Selection Summary */}
           <Box sx={{ mb: 2, display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
             <Typography variant="body2" color="text.secondary">
               {(() => {
@@ -612,8 +612,6 @@ const UpcomingEarnings = () => {
                 return `${totalSelections} stocks selected for automatic trading`;
               })()}
             </Typography>
-            
-            {/* Management Buttons - Removed as per new unified selection system */}
           </Box>
           
           {earnings.length > 0 ? (
@@ -695,7 +693,7 @@ const UpcomingEarnings = () => {
                                     onChange={(e) => handleTradeSelectionChange(earning.symbol, earning.date, e.target.checked)}
                                     color="primary"
                                     size="small"
-                                    title={isAutoSelected ? "High-scoring stock (Score 80+)" : "Select for trade execution"}
+                                    title={isAutoSelected ? "High-scoring stock (Score 80+)" : "Select for automatic trading"}
                                     disabled={isLoading}
                                   />
                                 </TableCell>

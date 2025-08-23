@@ -140,6 +140,50 @@ class TradingScheduler:
             logger.error(f"Failed to stop scheduler: {e}")
             raise
 
+    def _get_auto_selected_trades_for_execution(self) -> List[Dict]:
+        """Get auto-selected trades from trade_selections table and convert to execution format."""
+        try:
+            # Get all trade selections that are marked as selected
+            trade_selections = self.database.get_trade_selections()
+            
+            if not trade_selections:
+                return []
+            
+            # Filter for auto-selected trades (not manually deselected)
+            auto_selected = [
+                selection for selection in trade_selections 
+                if selection.get('is_selected') and not selection.get('manually_deselected')
+            ]
+            
+            if not auto_selected:
+                return []
+            
+            # Convert to the format expected by trade executor
+            execution_trades = []
+            for selection in auto_selected:
+                # Get the latest scan result for this ticker
+                scan_result = self.database.get_latest_scan_result(selection['ticker'])
+                
+                if scan_result:
+                    # Create trade data in the format expected by trade executor
+                    trade_data = {
+                        'ticker': selection['ticker'],
+                        'earnings_date': selection['earnings_date'],
+                        'earnings_time': 'amc',  # Default to AMC
+                        'recommendation_score': scan_result.get('recommendation_score', 0),
+                        'filters': scan_result.get('filters', {}),
+                        'reasoning': scan_result.get('reasoning', ''),
+                        'status': 'selected'
+                    }
+                    execution_trades.append(trade_data)
+            
+            logger.info(f"Found {len(execution_trades)} auto-selected trades for execution")
+            return execution_trades
+            
+        except Exception as e:
+            logger.error(f"Error getting auto-selected trades for execution: {e}")
+            return []
+
     def get_scheduler_status(self) -> Dict:
         """Get comprehensive scheduler status."""
         try:
@@ -175,8 +219,8 @@ class TradingScheduler:
         try:
             logger.info("Starting trade entry job...")
             
-            # Get selected trades
-            selected_trades = self.database.get_selected_trades()
+            # Get auto-selected trades from trade_selections table
+            selected_trades = self._get_auto_selected_trades_for_execution()
             
             if not selected_trades:
                 logger.info("No trades selected for execution")
@@ -282,13 +326,14 @@ class TradingScheduler:
                     symbol = trade_info['symbol']
                     logger.info(f"Exiting calendar spread position for {symbol}")
                     
-                    # Close the calendar spread
+                    # Close the calendar spread with market order for immediate execution
                     exit_result = self.alpaca_client.close_calendar_spread(
                         symbol=symbol,
                         short_exp=trade_info['short_expiration'],
                         long_exp=trade_info['long_expiration'],
                         option_type='call',
-                        quantity=trade_info['position_size']
+                        quantity=trade_info['position_size'],
+                        order_type='market'  # FIXED: Use market orders for exits
                     )
                     
                     if exit_result:

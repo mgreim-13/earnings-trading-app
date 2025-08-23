@@ -22,12 +22,17 @@ def main():
         # Initialize scheduler
         scheduler = TradingScheduler()
         
+        # Set global scheduler reference in app.py
+        from api.app import set_trading_scheduler
+        set_trading_scheduler(scheduler)
+        
         # Start the scheduler
         scheduler.start()
         
         logger.info("✅ Trading Application started successfully")
         logger.info("📊 Scheduler status: %s", scheduler.get_scheduler_status())
         
+        # Return the app for external use (tests, etc.)
         return app
         
     except Exception as e:
@@ -35,4 +40,13 @@ def main():
         raise
 
 if __name__ == "__main__":
-    main()
+    # When run directly, start the web server
+    import uvicorn
+    app = main()
+    logger.info("🌐 Starting FastAPI web server...")
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="info"
+    )
