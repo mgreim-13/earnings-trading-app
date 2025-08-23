@@ -244,15 +244,15 @@ PREVENT_LIVE_TRADING_IN_TESTS = os.getenv("PREVENT_LIVE_TRADING_IN_TESTS", "true
 
 # Filter Weights for Scoring
 FILTER_WEIGHTS = {
-    'avg_volume': 0.11,      # 0.11 / 1.08 = 0.102
-    'iv30_rv30': 0.20,       # 0.20 / 1.08 = 0.185
-    'ts_slope_0_45': 0.157,   # 0.17 / 1.08 = 0.157
-    'hist_earn_vol': 0.167,   # 0.18 / 1.08 = 0.167
-    'option_liquidity': 0.167, # 0.18 / 1.08 = 0.167
-    'iv_percentile': 0.093,   # 0.10 / 1.08 = 0.093
-    'beta': 0.065,             # 0.07 / 1.08 = 0.065
-    'short': 0.037,            # 0.04 / 1.08 = 0.037
-    'rsi': 0.028,              # 0.03 / 1.08 = 0.028
+    'avg_volume': 0.12,
+    'iv30_rv30': 0.20,
+    'ts_slope_0_45': 0.17,
+    'hist_earn_vol': 0.18,
+    'option_liquidity': 0.18,
+    'iv_percentile': 0.10,
+    'beta': 0.07,
+    'short': 0.04,
+    'rsi': 0.02,
 }
 
 # Scoring Thresholds
@@ -324,12 +324,12 @@ MARKET_CAP_TIERS = {
 # Sector Adjustments
 SECTOR_ADJUSTMENTS = {
     'Technology': {
-        'min_iv_rv_ratio': 1.1,  # Tech stocks often have higher IV
+        'min_iv_rv_ratio': 1.1,  
         'max_beta': 1.8,
         'rsi_upper': 70
     },
     'Healthcare': {
-        'min_iv_rv_ratio': 1.4,  # Healthcare often has higher volatility
+        'min_iv_rv_ratio': 1.4,  
         'max_hist_earn_move': 18.0,
         'max_beta': 2.0
     },
@@ -345,8 +345,16 @@ SECTOR_ADJUSTMENTS = {
         'max_beta': 2.5
     },
     'Consumer Cyclical': {
-        'min_iv_rv_ratio': 1.3,
-        'max_beta': 1.7
+        'min_iv_rv_ratio': 1.3,   
+        'max_beta': 1.7,          
+        'max_hist_earn_move': 15.0  
+    },
+    'Utilities': {               
+        'min_iv_rv_ratio': 1.0,   
+        'max_beta': 1.0,          
+        'rsi_lower': 35,          
+        'rsi_upper': 65,          
+        'max_hist_earn_move': 8.0  
     },
     'default': {}
 }

@@ -193,12 +193,12 @@ def get_dynamic_thresholds(stock):
         except Exception as e:
             raise ValueError(f"Failed to compute historical volatility thresholds: {str(e)}")
         
-        # Other defaults (can expand for slope normalization, etc.)
-        thresholds['max_ts_slope'] = -0.00406  # Could normalize: e.g., -0.0002 * front_iv (add if fetching front_iv)
-        thresholds['max_opt_spread'] = 0.1
-        thresholds['max_short_pct'] = 10.0
-        thresholds['rsi_lower'] = 40
-        thresholds['rsi_upper'] = 60
+        # Other defaults (only set if not already specified by sector adjustments)
+        thresholds.setdefault('max_ts_slope', -0.00406)  # Could normalize: e.g., -0.0002 * front_iv (add if fetching front_iv)
+        thresholds.setdefault('max_opt_spread', 0.1)
+        thresholds.setdefault('max_short_pct', 10.0)
+        thresholds.setdefault('rsi_lower', 40)
+        thresholds.setdefault('rsi_upper', 60)
 
         
         return thresholds
@@ -361,7 +361,7 @@ def compute_recommendation(ticker):
             earnings_dates = stock.earnings_dates
             if earnings_dates is not None and not earnings_dates.empty:
                 # Note: This is used for relative time calculations, timezone not critical
-                now = datetime.now()
+                now = datetime.now(timezone.utc)
                 past_earnings = earnings_dates[earnings_dates['Earnings Date'] < now].tail(4)
                 moves = []
                 for dt in past_earnings.index:

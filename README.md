@@ -68,7 +68,7 @@ The app uses a sophisticated **10-factor scoring algorithm** that evaluates stoc
 | **Beta** | 7% | Market correlation measure | Large: 1.3 max, Mid: 1.6 max, Small: 2.0 max |
 | **Short Interest** | 4% | Short selling activity | Large: 5% max, Mid: 7% max, Small: 10% max |
 | **RSI** | 2% | Relative Strength Index | Large: 35-65, Mid: 30-70, Small: 25-75 |
-| **Analyst Recommendations** | 2% | Wall Street consensus | Large: 2.0 max, Mid: 2.5 max, Small: 3.0 max |
+
 
 
 ### **Market Cap Tier System**

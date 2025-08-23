@@ -104,6 +104,249 @@ class TestFilters:
         thresholds = get_dynamic_thresholds(mock_stock)
         assert isinstance(thresholds, dict)
         assert 'min_iv_rv_ratio' in thresholds
+
+    @pytest.mark.unit
+    @patch('utils.filters.yf.Ticker')
+    def test_sector_adjustments_technology(self, mock_ticker):
+        """Test that Technology sector gets appropriate adjustments."""
+        mock_stock = Mock()
+        mock_stock.info = {
+            'marketCap': 5000000000,  # 5B market cap (mid tier)
+            'sector': 'Technology'
+        }
+        mock_stock.history.return_value = pd.DataFrame({
+            'High': np.random.uniform(100, 110, 252),
+            'Open': np.random.uniform(100, 110, 252),
+            'Low': np.random.uniform(90, 100, 252),
+            'Close': np.random.uniform(100, 110, 252)
+        })
+        
+        thresholds = get_dynamic_thresholds(mock_stock)
+        
+        # Technology sector adjustments should be applied and preserved
+        assert thresholds['max_beta'] == 1.8  # Technology adjustment, not 1.6 (mid tier)
+        assert thresholds['rsi_upper'] == 70  # Technology adjustment preserved
+        assert thresholds['rsi_lower'] == 30  # Technology adjustment preserved
+        
+        # Other thresholds should remain from mid-tier
+        assert thresholds['min_avg_volume'] == 500000  # Mid tier value
+        assert thresholds['max_ts_slope'] == -0.003  # Mid tier value preserved
+
+    @pytest.mark.unit
+    @patch('utils.filters.yf.Ticker')
+    def test_sector_adjustments_healthcare(self, mock_ticker):
+        """Test that Healthcare sector gets appropriate adjustments."""
+        mock_stock = Mock()
+        mock_stock.info = {
+            'marketCap': 15000000000,  # 15B market cap (large tier)
+            'sector': 'Healthcare'
+        }
+        mock_stock.history.return_value = pd.DataFrame({
+            'High': np.random.uniform(100, 110, 252),
+            'Open': np.random.uniform(100, 110, 252),
+            'Low': np.random.uniform(90, 100, 252),
+            'Close': np.random.uniform(100, 110, 252)
+        })
+        
+        thresholds = get_dynamic_thresholds(mock_stock)
+        
+        # Healthcare adjustments should override large tier thresholds
+        assert thresholds['max_hist_earn_move'] == 18.0  # Healthcare adjustment, not 8.0 (large tier)
+        assert thresholds['max_beta'] == 2.0  # Healthcare adjustment, not 1.3 (large tier)
+        
+        # Note: min_iv_rv_ratio gets overridden by historical volatility calculation
+        
+        # Other thresholds should remain from large tier
+        assert thresholds['min_avg_volume'] == 1000000  # Large tier value
+        assert thresholds['max_ts_slope'] == -0.004  # Large tier value preserved
+
+    @pytest.mark.unit
+    @patch('utils.filters.yf.Ticker')
+    def test_sector_adjustments_financial_services(self, mock_ticker):
+        """Test that Financial Services sector gets appropriate adjustments."""
+        mock_stock = Mock()
+        mock_stock.info = {
+            'marketCap': 3000000000,  # 3B market cap (mid tier)
+            'sector': 'Financial Services'
+        }
+        mock_stock.history.return_value = pd.DataFrame({
+            'High': np.random.uniform(100, 110, 252),
+            'Open': np.random.uniform(100, 110, 252),
+            'Low': np.random.uniform(90, 100, 252),
+            'Close': np.random.uniform(100, 110, 252)
+        })
+        
+        thresholds = get_dynamic_thresholds(mock_stock)
+        
+        # Financial Services adjustments should override mid tier thresholds
+        assert thresholds['max_beta'] == 1.6  # Financial Services adjustment, not 1.6 (mid tier) - same value
+        assert thresholds['rsi_lower'] == 30  # Financial Services adjustment preserved
+        assert thresholds['rsi_upper'] == 70  # Financial Services adjustment preserved
+        
+        # Other thresholds should remain from mid tier
+        assert thresholds['min_avg_volume'] == 500000  # Mid tier value
+
+    @pytest.mark.unit
+    @patch('utils.filters.yf.Ticker')
+    def test_sector_adjustments_energy(self, mock_ticker):
+        """Test that Energy sector gets appropriate adjustments."""
+        mock_stock = Mock()
+        mock_stock.info = {
+            'marketCap': 800000000,  # 800M market cap (small tier)
+            'sector': 'Energy'
+        }
+        mock_stock.history.return_value = pd.DataFrame({
+            'High': np.random.uniform(100, 110, 252),
+            'Open': np.random.uniform(100, 110, 252),
+            'Low': np.random.uniform(90, 100, 252),
+            'Close': np.random.uniform(100, 110, 252)
+        })
+        
+        thresholds = get_dynamic_thresholds(mock_stock)
+        
+        # Energy adjustments should override small tier thresholds
+        assert thresholds['max_hist_earn_move'] == 20.0  # Energy adjustment, not 15.0 (small tier)
+        assert thresholds['max_beta'] == 2.5  # Energy adjustment, not 2.0 (small tier)
+        
+        # Other thresholds should remain from small tier
+        assert thresholds['min_avg_volume'] == 300000  # Small tier value
+
+    @pytest.mark.unit
+    @patch('utils.filters.yf.Ticker')
+    def test_sector_adjustments_unknown_sector(self, mock_ticker):
+        """Test that unknown sectors fall back to default (no adjustments)."""
+        mock_stock = Mock()
+        mock_stock.info = {
+            'marketCap': 5000000000,  # 5B market cap (mid tier)
+            'sector': 'Unknown Sector'  # Not in SECTOR_ADJUSTMENTS
+        }
+        mock_stock.history.return_value = pd.DataFrame({
+            'High': np.random.uniform(100, 110, 252),
+            'Open': np.random.uniform(100, 110, 252),
+            'Low': np.random.uniform(90, 100, 252),
+            'Close': np.random.uniform(100, 110, 252)
+        })
+        
+        thresholds = get_dynamic_thresholds(mock_stock)
+        
+        # Should use mid tier thresholds with no sector adjustments
+        assert thresholds['max_beta'] == 1.6  # Mid tier value
+        assert thresholds['min_avg_volume'] == 500000  # Mid tier value
+
+    @pytest.mark.unit
+    @patch('utils.filters.yf.Ticker')
+    def test_sector_adjustments_override_logic(self, mock_ticker):
+        """Test that sector adjustments properly override base thresholds."""
+        mock_stock = Mock()
+        mock_stock.info = {
+            'marketCap': 5000000000,  # 5B market cap (mid tier)
+            'sector': 'Technology'
+        }
+        mock_stock.history.return_value = pd.DataFrame({
+            'High': np.random.uniform(100, 110, 252),
+            'Open': np.random.uniform(100, 110, 252),
+            'Low': np.random.uniform(90, 100, 252),
+            'Close': np.random.uniform(100, 110, 252)
+        })
+        
+        thresholds = get_dynamic_thresholds(mock_stock)
+        
+        # Verify that Technology sector adjustments override mid tier values
+        # Mid tier: max_beta = 1.6, Technology: max_beta = 1.8
+        assert thresholds['max_beta'] == 1.8  # Technology override
+        assert thresholds['max_beta'] != 1.6  # Not mid tier value
+
+    @pytest.mark.unit
+    @patch('utils.filters.yf.Ticker')
+    def test_sector_adjustments_consumer_cyclical(self, mock_ticker):
+        """Test that Consumer Cyclical sector gets appropriate adjustments."""
+        mock_stock = Mock()
+        mock_stock.info = {
+            'marketCap': 12000000000,  # 12B market cap (large tier)
+            'sector': 'Consumer Cyclical'
+        }
+        mock_stock.history.return_value = pd.DataFrame({
+            'High': np.random.uniform(100, 110, 252),
+            'Open': np.random.uniform(100, 110, 252),
+            'Low': np.random.uniform(90, 100, 252),
+            'Close': np.random.uniform(100, 110, 252)
+        })
+        
+        thresholds = get_dynamic_thresholds(mock_stock)
+        
+        # Consumer Cyclical adjustments should override large tier thresholds
+        assert thresholds['max_beta'] == 1.7  # Consumer Cyclical adjustment, not 1.3 (large tier)
+        
+        # Other thresholds should remain from large tier
+        assert thresholds['min_avg_volume'] == 1000000  # Large tier value
+        assert thresholds['max_ts_slope'] == -0.004  # Large tier value preserved
+
+    @pytest.mark.unit
+    @patch('utils.filters.yf.Ticker')
+    def test_sector_adjustments_missing_sector_info(self, mock_ticker):
+        """Test handling when sector information is missing."""
+        mock_stock = Mock()
+        mock_stock.info = {
+            'marketCap': 5000000000,  # 5B market cap (mid tier)
+            # 'sector' key is missing
+        }
+        mock_stock.history.return_value = pd.DataFrame({
+            'High': np.random.uniform(100, 110, 252),
+            'Open': np.random.uniform(100, 110, 252),
+            'Low': np.random.uniform(90, 100, 252),
+            'Close': np.random.uniform(100, 110, 252)
+        })
+        
+        # Should raise ValueError due to missing sector
+        with pytest.raises(ValueError, match="Missing sector data for stock"):
+            get_dynamic_thresholds(mock_stock)
+
+    @pytest.mark.unit
+    @patch('utils.filters.yf.Ticker')
+    def test_sector_adjustments_none_sector(self, mock_ticker):
+        """Test handling when sector is None."""
+        mock_stock = Mock()
+        mock_stock.info = {
+            'marketCap': 5000000000,  # 5B market cap (mid tier)
+            'sector': None
+        }
+        mock_stock.history.return_value = pd.DataFrame({
+            'High': np.random.uniform(100, 110, 252),
+            'Open': np.random.uniform(100, 110, 252),
+            'Low': np.random.uniform(90, 100, 252),
+            'Close': np.random.uniform(100, 110, 252)
+        })
+        
+        # Should raise ValueError due to None sector
+        with pytest.raises(ValueError, match="Missing sector data for stock"):
+            get_dynamic_thresholds(mock_stock)
+
+    @pytest.mark.unit
+    @patch('utils.filters.yf.Ticker')
+    def test_sector_adjustments_defaults_only_when_missing(self, mock_ticker):
+        """Test that defaults are only applied when sector adjustments don't specify values."""
+        mock_stock = Mock()
+        mock_stock.info = {
+            'marketCap': 5000000000,  # 5B market cap (mid tier)
+            'sector': 'Technology'  # Technology specifies rsi_upper = 70, rsi_lower = 30
+        }
+        mock_stock.history.return_value = pd.DataFrame({
+            'High': np.random.uniform(100, 110, 252),
+            'Open': np.random.uniform(100, 110, 252),
+            'Low': np.random.uniform(90, 100, 252),
+            'Close': np.random.uniform(100, 110, 252)
+        })
+        
+        thresholds = get_dynamic_thresholds(mock_stock)
+        
+        # Sector adjustments should be preserved when specified
+        assert thresholds['rsi_upper'] == 70  # Technology adjustment preserved
+        assert thresholds['rsi_lower'] == 30  # Technology adjustment preserved
+        assert thresholds['max_beta'] == 1.8  # Technology adjustment preserved
+        
+        # Values not specified by sector should come from market cap tier
+        assert thresholds['max_opt_spread'] == 0.12  # Mid tier value (not in Technology config)
+        assert thresholds['max_short_pct'] == 7.0  # Mid tier value (not in Technology config)
     
     @pytest.mark.unit
     def test_get_partial_score(self):
