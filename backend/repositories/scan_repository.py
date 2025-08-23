@@ -50,7 +50,7 @@ class ScanRepository(BaseRepository):
         try:
             query = """
                 SELECT * FROM scan_results 
-                WHERE scanned_at >= datetime('now', ? || ' days')
+                WHERE scanned_at >= datetime('now', 'localtime', ? || ' days')
                 ORDER BY scanned_at DESC
             """
             
@@ -127,7 +127,7 @@ class ScanRepository(BaseRepository):
             query = f"""
                 SELECT * FROM scan_results 
                 WHERE ticker IN ({placeholders})
-                AND scanned_at >= datetime('now', '-{ttl_minutes} minutes')
+                AND scanned_at >= datetime('now', 'localtime', '-{ttl_minutes} minutes')
                 ORDER BY scanned_at DESC
             """
             
@@ -187,7 +187,7 @@ class ScanRepository(BaseRepository):
             # Recent count (last 24 hours)
             recent_query = """
                 SELECT COUNT(*) FROM scan_results 
-                WHERE scanned_at >= datetime('now', '-1 day')
+                WHERE scanned_at >= datetime('now', 'localtime', '-1 day')
             """
             stats['recent_results'] = self.execute_scalar(recent_query) or 0
             

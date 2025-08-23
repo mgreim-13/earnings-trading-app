@@ -244,15 +244,15 @@ PREVENT_LIVE_TRADING_IN_TESTS = os.getenv("PREVENT_LIVE_TRADING_IN_TESTS", "true
 
 # Filter Weights for Scoring
 FILTER_WEIGHTS = {
-    'avg_volume': 0.12,
-    'iv30_rv30': 0.20,
-    'ts_slope_0_45': 0.17,
-    'hist_earn_vol': 0.18,
+    'avg_volume': 0.10,
+    'iv30_rv30': 0.22,
+    'ts_slope_0_45': 0.18,
+    'hist_earn_vol': 0.16,
     'option_liquidity': 0.18,
     'iv_percentile': 0.10,
-    'beta': 0.07,
-    'short': 0.04,
-    'rsi': 0.02,
+    'beta': 0.03,
+    'short': 0.02,
+    'rsi': 0.01,
 }
 
 # Scoring Thresholds

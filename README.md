@@ -59,15 +59,15 @@ The app uses a sophisticated **10-factor scoring algorithm** that evaluates stoc
 
 | Filter | Weight | Description | Thresholds |
 |--------|--------|-------------|------------|
-| **IV30/RV30 Ratio** | 20% | Implied vs Realized Volatility comparison | Large: 1.3+, Mid: 1.4+, Small: 1.5+ |
-| **Term Structure Slope** | 17% | Volatility curve steepness (0-45 days) | Large: -0.004 max, Mid: -0.003 max, Small: -0.002 max |
+| **IV30/RV30 Ratio** | 22% | Implied vs Realized Volatility comparison | Large: 1.3+, Mid: 1.4+, Small: 1.5+ |
+| **Term Structure Slope** | 18% | Volatility curve steepness (0-45 days) | Large: -0.004 max, Mid: -0.003 max, Small: -0.002 max |
 | **Option Liquidity** | 18% | Open interest, volume, bid-ask spreads | Large: OI 1000+, Vol 250+, Spread 10% max |
-| **Historical Earnings Volatility** | 18% | Past earnings move magnitude | Large: 8% max, Mid: 12% max, Small: 15% max |
-| **Average Volume** | 12% | Stock trading volume requirements | Large: 1M+, Mid: 500K+, Small: 300K+ |
+| **Historical Earnings Volatility** | 16% | Past earnings move magnitude | Large: 8% max, Mid: 12% max, Small: 15% max |
+| **Average Volume** | 10% | Stock trading volume requirements | Large: 1M+, Mid: 500K+, Small: 300K+ |
 | **IV Percentile** | 10% | Current IV vs historical IV ranking | Large: 60+, Mid: 55+, Small: 50+ |
-| **Beta** | 7% | Market correlation measure | Large: 1.3 max, Mid: 1.6 max, Small: 2.0 max |
-| **Short Interest** | 4% | Short selling activity | Large: 5% max, Mid: 7% max, Small: 10% max |
-| **RSI** | 2% | Relative Strength Index | Large: 35-65, Mid: 30-70, Small: 25-75 |
+| **Beta** | 3% | Market correlation measure | Large: 1.3 max, Mid: 1.6 max, Small: 2.0 max |
+| **Short Interest** | 2% | Short selling activity | Large: 5% max, Mid: 7% max, Small: 10% max |
+| **RSI** | 1% | Relative Strength Index | Large: 35-65, Mid: 30-70, Small: 25-75 |
 
 
 

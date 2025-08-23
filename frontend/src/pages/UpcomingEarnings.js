@@ -356,17 +356,16 @@ const UpcomingEarnings = () => {
     // Use filter weights from API response, fallback to hardcoded values if not available
     const weights = filterWeights && Object.keys(filterWeights).length > 0 
       ? filterWeights 
-      : {
-          'avg_volume': 0.102,
-          'iv30_rv30': 0.185,
-          'ts_slope_0_45': 0.157,
-          'hist_earn_vol': 0.167,
-          'option_liquidity': 0.167,
-          'iv_percentile': 0.093,
-          'beta': 0.065,
-          'short': 0.037,
-          'rsi': 0.028,
-
+              : {
+          'avg_volume': 0.10,
+          'iv30_rv30': 0.22,
+          'ts_slope_0_45': 0.18,
+          'hist_earn_vol': 0.16,
+          'option_liquidity': 0.18,
+          'iv_percentile': 0.10,
+          'beta': 0.03,
+          'short': 0.02,
+          'rsi': 0.01,
         };
     
     return weights[filterName] || 0;
