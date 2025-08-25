@@ -23,20 +23,20 @@ logger = logging.getLogger(__name__)
 def filter_dates(dates):
     """Filter dates to include options suitable for earnings calendar spread trading."""
     today = datetime.today().date()
-    cutoff_date = today + timedelta(days=45)
     
     try:
         sorted_dates = sorted([datetime.strptime(date, "%Y-%m-%d").date() for date in dates])
     except ValueError as e:
         raise ValueError(f"Invalid date format in dates: {e}")
     
-    # Filter to only include dates that are 45+ days in the future
-    filtered_dates = [date for date in sorted_dates if date >= cutoff_date]
+    # Filter to only include dates that are in the future (for calendar spreads)
+    # We need options that can be used for calendar spreads, not necessarily 45+ days out
+    filtered_dates = [date for date in sorted_dates if date > today]
     
     if len(filtered_dates) > 0:
         return [date.strftime("%Y-%m-%d") for date in filtered_dates]
     
-    raise ValueError("No date 45 days or more in the future found.")
+    raise ValueError("No future dates found.")
 
 def yang_zhang(price_data, window=30, trading_periods=252, return_last_only=True):
     """Calculate Yang-Zhang volatility estimator."""
@@ -200,7 +200,6 @@ def get_dynamic_thresholds(stock):
         thresholds.setdefault('rsi_lower', 40)
         thresholds.setdefault('rsi_upper', 60)
 
-        
         return thresholds
         
     except Exception as e:
@@ -247,6 +246,7 @@ def compute_recommendation(ticker):
     This function integrates with the existing project structure and returns
     the same format expected by cache_service, scheduler, and other components.
     """
+    
     try:
         # Handle None and empty ticker values
         if ticker is None:
@@ -267,7 +267,7 @@ def compute_recommendation(ticker):
         try:
             exp_dates = filter_dates(exp_dates)
         except:
-            return "SKIP: Not enough option data - need options expiring 45+ days in future"
+            return "SKIP: Not enough option data - need options expiring in the future"
         
         options_chains = {}
         for exp_date in exp_dates:
@@ -437,7 +437,6 @@ def compute_recommendation(ticker):
         scores['short'] = get_partial_score(short_pct, thresholds['max_short_pct'], is_min=False) if short_pct is not None else 0.0
         scores['rsi'] = 1.0 if thresholds['rsi_lower'] <= rsi <= thresholds['rsi_upper'] else (0.5 if abs(rsi - 50) < config.SCORING_THRESHOLDS['rsi_neutral_zone'] else 0.0)  # Marginal for near-neutral
 
-        
         # Calculate total weighted score
         total_score = sum(scores[filter_name] * config.FILTER_WEIGHTS[filter_name] for filter_name in scores) * 100  # As percentage
         
