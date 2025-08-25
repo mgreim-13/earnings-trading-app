@@ -446,13 +446,8 @@ class AlpacaClient:
                 
         except Exception as e:
             logger.warning(f"Failed to fetch real option quotes for {option_symbol}: {e}")
-            # Fallback to mock data for development/testing
-            return {
-                'bid': 1.0,
-                'ask': 1.1,
-                'last': 1.05,
-                'timestamp': datetime.now(timezone.utc).isoformat()
-            }
+            # Return None instead of fake data to prevent production issues
+            return None
 
     # Options discovery methods
     def discover_available_options(self, symbol: str, target_expiration: str = None) -> Optional[Dict]:
