@@ -184,7 +184,7 @@ class TestFrontendSettings:
         """Test that schedule information is displayed cleanly."""
         # Test schedule information structure
         schedule_info = {
-            'Daily Scan': '3:00 PM ET',
+            'Daily Scan': '3:30 PM ET',
             'Trade Entry': '3:45 PM ET',
             'Trade Exit': '9:45 AM ET',
             'Data Cleanup': 'Sun 2:00 AM ET'

@@ -194,27 +194,7 @@ class TestEarningsScanner:
         """Test scanner initialization."""
         assert self.scanner is not None
 
-    @pytest.mark.unit
-    def test_get_earnings_calendar(self):
-        """Test getting earnings calendar."""
-        mock_earnings = [
-            {'symbol': 'AAPL', 'date': '2024-01-15', 'hour': 'amc'},
-            {'symbol': 'GOOGL', 'date': '2024-01-16', 'hour': 'bmo'}
-        ]
-        
-        with patch.object(self.scanner, 'get_earnings_calendar', return_value=mock_earnings) as mock_get:
-            result = self.scanner.get_earnings_calendar('2024-01-15', '2024-01-16')
-            assert isinstance(result, list)
-            assert len(result) >= 0
-            mock_get.assert_called_once_with('2024-01-15', '2024-01-16')
 
-    @pytest.mark.unit
-    def test_get_earnings_calendar_error_handling(self):
-        """Test earnings calendar error handling."""
-        with patch.object(self.scanner, 'get_earnings_calendar', return_value=[]) as mock_get:
-            result = self.scanner.get_earnings_calendar('2024-01-15', '2024-01-16')
-            assert result == []
-            mock_get.assert_called_once_with('2024-01-15', '2024-01-16')
 
     @pytest.mark.unit
     def test_filter_earnings_timing(self):

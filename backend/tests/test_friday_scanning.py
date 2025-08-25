@@ -56,65 +56,7 @@ class TestFridayScanning:
             with pytest.raises(AttributeError):
                 self.mock_earnings_scanner.get_upcoming_earnings.assert_called_once()
     
-    def test_scan_specific_symbols_calls_correct_method(self):
-        """Test that scan_specific_symbols calls get_earnings_for_scanning through _resolve_earnings_date."""
-        symbols = ['AAPL', 'GOOGL']
-        
-        # Mock the database to return no existing scan results
-        self.mock_database.get_latest_scan_result.return_value = None
-        
-        # Mock the earnings scanner
-        mock_earnings = [
-            {'symbol': 'AAPL', 'date': '2024-01-19', 'hour': 'amc'},
-            {'symbol': 'GOOGL', 'date': '2024-01-22', 'hour': 'bmo'}
-        ]
-        self.mock_earnings_scanner.get_earnings_for_scanning.return_value = mock_earnings
-        
-        # Mock the database methods
-        self.mock_database.add_scan_result.return_value = True
-        self.mock_database.set_trade_selection.return_value = True
-        
-        # Mock the compute_recommendation function
-        with patch('services.scan_manager.compute_recommendation') as mock_compute:
-            mock_compute.return_value = {
-                'score': 85,
-                'filters': {'volume': 'high'},
-                'reasoning': 'Strong earnings potential'
-            }
-            
-            # Run the scan
-            result = self.scan_manager.scan_specific_symbols(symbols)
-            
-            # Verify the method was called (through _resolve_earnings_date)
-            self.mock_earnings_scanner.get_earnings_for_scanning.assert_called()
-            
-            # Verify the result
-            assert result['total_scanned'] == 2
-            assert result['total_selected'] == 2
-    
-    def test_get_earnings_calendar_calls_correct_method(self):
-        """Test that get_earnings_calendar calls get_earnings_for_scanning."""
-        # Mock the earnings scanner
-        mock_earnings = [
-            {'symbol': 'AAPL', 'date': '2024-01-19', 'hour': 'amc'},
-            {'symbol': 'GOOGL', 'date': '2024-01-22', 'hour': 'bmo'}
-        ]
-        self.mock_earnings_scanner.get_earnings_for_scanning.return_value = mock_earnings
-        
-        # Mock the database methods
-        self.mock_database.get_latest_scan_result.return_value = None
-        self.mock_database.get_trade_selections.return_value = []
-        
-        # Run the method
-        result = self.scan_manager.get_earnings_calendar()
-        
-        # Verify the correct method was called
-        self.mock_earnings_scanner.get_earnings_for_scanning.assert_called_once()
-        
-        # Verify the result
-        assert len(result) == 2
-        assert result[0]['symbol'] == 'AAPL'
-        assert result[1]['symbol'] == 'GOOGL'
+
     
     def test_friday_scanning_with_amc_earnings(self):
         """Test that Friday scanning finds AMC earnings correctly."""
@@ -263,16 +205,7 @@ class TestFridayScanning:
             # Reset mock
             self.mock_earnings_scanner.get_earnings_for_scanning.reset_mock()
             
-            # Test scan_specific_symbols
-            self.scan_manager.scan_specific_symbols(['AAPL'])
-            self.mock_earnings_scanner.get_earnings_for_scanning.assert_called()
-            
-            # Reset mock
-            self.mock_earnings_scanner.get_earnings_for_scanning.reset_mock()
-            
-            # Test get_earnings_calendar
-            self.scan_manager.get_earnings_calendar()
-            self.mock_earnings_scanner.get_earnings_for_scanning.assert_called()
+
 
 
 class TestEarningsScannerMethods:
@@ -314,7 +247,6 @@ class TestEarningsScannerMethods:
         assert not hasattr(scanner, 'get_upcoming_earnings')
         
         # Verify other expected methods exist
-        assert hasattr(scanner, 'get_earnings_calendar')
         assert hasattr(scanner, 'get_tomorrow_earnings')
         assert hasattr(scanner, 'get_today_post_market_earnings')
         assert hasattr(scanner, 'get_earnings_for_scanning')

@@ -258,7 +258,7 @@ const Settings = () => {
                 <Grid item xs={6} sm={3}>
                   <Box textAlign="center">
                     <Typography variant="body2" color="text.secondary">Daily Scan</Typography>
-                    <Typography variant="h6" fontWeight="bold">3:00 PM ET</Typography>
+                                            <Typography variant="h6" fontWeight="bold">3:30 PM ET</Typography>
                   </Box>
                 </Grid>
                 <Grid item xs={6} sm={3}>

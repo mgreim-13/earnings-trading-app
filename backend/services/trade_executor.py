@@ -52,8 +52,8 @@ class TradeExecutor:
             # Get estimated cost per contract from trade data
             estimated_cost = trade_data.get('estimated_cost', 0)
             if estimated_cost <= 0:
-                symbol = trade_data.get('symbol', 'unknown')
-                logger.warning(f"No estimated cost available for {symbol}, using default position size of {DEFAULT_POSITION_SIZE}")
+                ticker = trade_data.get('ticker', 'unknown')  # ← Changed from 'symbol' to 'ticker'
+                logger.warning(f"No estimated cost available for {ticker}, using default position size of {DEFAULT_POSITION_SIZE}")
                 return DEFAULT_POSITION_SIZE
             
             # Calculate position size based on risk
@@ -70,7 +70,7 @@ class TradeExecutor:
             position_size = min(max_contracts_by_risk, max_position_size)
             position_size = max(position_size, DEFAULT_POSITION_SIZE)  # Minimum 1 contract
             
-            logger.info(f"Position sizing for {trade_data.get('symbol', 'unknown')}:")
+            logger.info(f"Position sizing for {trade_data.get('ticker', 'unknown')}:")  # ← Changed from 'symbol' to 'ticker'
             logger.info(f"  - Buying power: ${buying_power:,.2f}")
             logger.info(f"  - Max risk amount: ${max_risk_amount:,.2f}")
             logger.info(f"  - Cost per contract: ${cost_per_contract:,.2f}")
@@ -129,6 +129,7 @@ class TradeExecutor:
             
             # Prepare trade data
             trade_data = {
+                'ticker': symbol,  # ← Added ticker field for consistency
                 'symbol': symbol,
                 'current_price': current_price,
                 'atm_strike': atm_strike,
@@ -144,16 +145,20 @@ class TradeExecutor:
                 'prepared_at': datetime.now(self.et_tz).isoformat()
             }
             
-            # Calculate position size
+            # Calculate position size (now that ticker field exists)
             position_size = self.calculate_position_size(trade_data)
             trade_data['position_size'] = position_size
             
+            # Debug logging to see what fields are actually present
             logger.info(f"Trade prepared for {symbol}:")
+            logger.info(f"  - Ticker field: {trade_data.get('ticker', 'MISSING')}")
+            logger.info(f"  - Symbol field: {trade_data.get('symbol', 'MISSING')}")
             logger.info(f"  - Strike: {atm_strike}")
             logger.info(f"  - Short exp: {best_spread['short_option']['expiration']}")
             logger.info(f"  - Long exp: {best_spread['long_option']['expiration']}")
             logger.info(f"  - Estimated cost: ${best_spread['estimated_cost']:.2f}")
             logger.info(f"  - Position size: {position_size} contracts")
+            logger.info(f"  - All fields: {list(trade_data.keys())}")
             
             return trade_data
             
@@ -164,15 +169,20 @@ class TradeExecutor:
     async def prepare_calendar_spread_trade_async(self, symbol: str, earning: Dict, recommendation: Dict) -> Optional[Dict]:
         """Async version of prepare_calendar_spread_trade."""
         try:
+            logger.info(f"🔍 Async trade preparation starting for {symbol}")
             # Run the synchronous method in a thread pool
             loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
+            result = await loop.run_in_executor(
                 None, 
                 self.prepare_calendar_spread_trade, 
                 symbol, 
                 earning, 
                 recommendation
             )
+            logger.info(f"🔍 Async trade preparation completed for {symbol}, result: {result is not None}")
+            if result:
+                logger.info(f"🔍 Prepared trade fields: {list(result.keys())}")
+            return result
         except Exception as e:
             logger.error(f"Error in async trade preparation for {symbol}: {e}")
             return None
@@ -254,12 +264,17 @@ class TradeExecutor:
             
             for trade_data in prepared_trades:
                 try:
-                    symbol = trade_data['symbol']
-                    logger.info(f"Executing calendar spread for {symbol}")
+                    # Debug logging to see what fields are present
+                    logger.info(f"🔍 Executing trade with fields: {list(trade_data.keys())}")
+                    logger.info(f"🔍 Trade data ticker: {trade_data.get('ticker', 'MISSING')}")
+                    logger.info(f"🔍 Trade data symbol: {trade_data.get('symbol', 'MISSING')}")
+                    
+                    ticker = trade_data['ticker']  # ← Changed from 'symbol' to 'ticker'
+                    logger.info(f"Executing calendar spread for {ticker}")
                     
                     # Place the calendar spread order
                     order_result = self.alpaca_client.place_calendar_spread_order(
-                        symbol=symbol,
+                        symbol=ticker,  # ← Changed from 'symbol' to 'ticker'
                         short_exp=trade_data['short_expiration'],
                         long_exp=trade_data['long_expiration'],
                         option_type='call',
@@ -274,13 +289,13 @@ class TradeExecutor:
                         trade_data['executed_at'] = datetime.now(self.et_tz).isoformat()
                         
                         executed_trades.append(trade_data)
-                        logger.info(f"Successfully executed trade for {symbol} - Order ID: {order_result['order_id']}")
+                        logger.info(f"Successfully executed trade for {ticker} - Order ID: {order_result['order_id']}")  # ← Changed from 'symbol' to 'ticker'
                     else:
                         failed_trades.append(trade_data)
-                        logger.error(f"Failed to execute trade for {symbol}")
+                        logger.error(f"Failed to execute trade for {ticker}")  # ← Changed from 'symbol' to 'ticker'
                         
                 except Exception as e:
-                    logger.error(f"Error executing trade for {trade_data.get('symbol', 'unknown')}: {e}")
+                    logger.error(f"Error executing trade for {trade_data.get('ticker', 'unknown')}: {e}")  # ← Changed from 'symbol' to 'ticker'
                     failed_trades.append(trade_data)
             
             execution_time = (datetime.now(self.et_tz) - start_time).total_seconds()
@@ -309,6 +324,56 @@ class TradeExecutor:
                 'failed_trades': selected_trades,
                 'execution_time': execution_time
             }
+
+    async def execute_exit_trades(self, exit_trades: List[Dict]) -> Dict:
+        """Execute exit trades with limit orders initially."""
+        try:
+            logger.info(f"Starting exit trade execution for {len(exit_trades)} positions")
+            
+            executed_exits = []
+            failed_exits = []
+            
+            for trade_info in exit_trades:
+                try:
+                    ticker = trade_info['ticker']  # ← Changed from 'symbol' to 'ticker'
+                    logger.info(f"Executing exit for {ticker}")
+                    
+                    # Place limit order initially (not market order)
+                    exit_result = self.alpaca_client.close_calendar_spread(
+                        symbol=ticker,  # ← Changed from 'symbol' to 'ticker'
+                        short_exp=trade_info['short_expiration'],
+                        long_exp=trade_info['long_expiration'],
+                        option_type='call',
+                        quantity=trade_info['position_size'],
+                        order_type='limit'  # Start with limit order
+                    )
+                    
+                    if exit_result:
+                        # Update trade data with order information
+                        trade_info['order_id'] = exit_result['order_id']
+                        trade_info['order_status'] = exit_result['status']
+                        trade_info['executed_at'] = datetime.now(self.et_tz).isoformat()
+                        
+                        executed_exits.append(trade_info)
+                        logger.info(f"Successfully placed exit limit order for {ticker} - Order ID: {exit_result['order_id']}")  # ← Changed from 'symbol' to 'ticker'
+                    else:
+                        failed_exits.append(trade_info)
+                        logger.error(f"Failed to place exit limit order for {ticker}")  # ← Changed from 'symbol' to 'ticker'
+                        
+                except Exception as e:
+                    logger.error(f"Error executing exit for {trade_info.get('ticker', 'unknown')}: {e}")  # ← Changed from 'symbol' to 'ticker'
+                    failed_exits.append(trade_info)
+            
+            return {
+                'success': len(executed_exits) > 0,
+                'message': f'Executed {len(executed_exits)} out of {len(exit_trades)} exit trades',
+                'executed_trades': executed_exits,
+                'failed_trades': failed_exits
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in exit trade execution: {e}")
+            return {'success': False, 'message': str(e)}
 
     def _is_calendar_spread_position(self, symbol: str) -> bool:
         """Check if a symbol has an active calendar spread position."""

@@ -202,10 +202,11 @@ npm start
 ## 📈 Usage
 
 ### **Daily Workflow**
-1. **3:00 PM ET**: Automated earnings scan runs
+1. **3:30 PM ET**: Automated earnings scan runs
 2. **3:45 PM ET**: Selected trades are executed
 3. **9:45 AM ET**: Next day positions are closed
 4. **Continuous**: Order monitoring and risk management
+5. **Friday 4:05 PM ET**: Weekly data cleanup
 
 ### **Manual Operations**
 - **Scan Specific Symbols**: Run scans on demand

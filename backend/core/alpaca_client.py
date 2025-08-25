@@ -1249,66 +1249,60 @@ class AlpacaClient:
 
     def validate_calendar_spread_position(self, symbol: str, short_exp: str, long_exp: str, 
                                         option_type: str = 'call') -> Optional[Dict]:
-        """Validate that a calendar spread position exists and can be closed."""
+        """Validate that options positions exist for the target ticker and can be closed."""
+        logger.info(f"🚀 NEW VALIDATION METHOD CALLED for {symbol} with {short_exp} and {long_exp}")
+        
         # Validate inputs
-        if not symbol or not short_exp or not long_exp:
-            logger.error("Symbol, short_exp, and long_exp are required")
+        if not symbol:
+            logger.error("Symbol is required")
             return None
         
-        if not isinstance(symbol, str) or not isinstance(short_exp, str) or not isinstance(long_exp, str):
-            logger.error("Symbol, short_exp, and long_exp must be strings")
-            return None
-        
-        # Validate date format (basic check)
-        if len(short_exp) != 10 or short_exp.count('-') != 2 or len(long_exp) != 10 or long_exp.count('-') != 2:
-            logger.error("Invalid date format. Use YYYY-MM-DD")
+        if not isinstance(symbol, str):
+            logger.error("Symbol must be a string")
             return None
         
         try:
-            if option_type.lower() != 'call':
-                logger.warning(f"Strategy requires call options, using calls instead of {option_type}")
-                option_type = 'call'
-            
             positions = self.get_positions()
             if not positions:
+                logger.info(f"No positions found for {symbol}")
                 return None
             
-            target_strike = self._get_atm_strike(symbol)
-            if not target_strike:
-                return None
+            logger.info(f"Found {len(positions)} total positions")
             
-            short_symbol = f"{symbol}{short_exp.replace('-', '')}C{int(target_strike * 1000)}"
-            long_symbol = f"{symbol}{long_exp.replace('-', '')}C{int(target_strike * 1000)}"
-            
-            short_position = None
-            long_position = None
+            # Find ALL options positions for this ticker
+            ticker_options = []
+            total_quantity = 0
             
             for position in positions:
-                if position['symbol'] == short_symbol:
-                    short_position = position
-                elif position['symbol'] == long_symbol:
-                    long_position = position
+                pos_symbol = position['symbol']
+                logger.info(f"Checking position: {pos_symbol}")
+                
+                # Check if this is an options position for our target ticker
+                if symbol in pos_symbol and ('C' in pos_symbol or 'P' in pos_symbol):
+                    ticker_options.append(position)
+                    total_quantity += abs(float(position['qty']))
+                    logger.info(f"Found options position: {pos_symbol}, qty: {position['qty']}")
             
-            if not short_position or not long_position:
+            if not ticker_options:
+                logger.info(f"No options positions found for {symbol}")
                 return None
             
-            if short_position['qty'] != long_position['qty']:
-                return None
+            logger.info(f"Found {len(ticker_options)} options positions for {symbol} with total quantity {total_quantity}")
             
+            # Return validation info - we don't need to match specific expirations/strikes
             return {
                 'symbol': symbol,
                 'option_type': option_type,
-                'short_expiration': short_exp,
-                'long_expiration': long_exp,
-                'strike_price': target_strike,
-                'quantity': abs(short_position['qty']),
-                'short_position': short_position,
-                'long_position': long_position,
+                'short_expiration': short_exp,  # Keep for reference
+                'long_expiration': long_exp,    # Keep for reference
+                'strike_price': None,           # Not needed for simple close
+                'quantity': total_quantity,
+                'positions': ticker_options,    # All found positions
                 'status': 'valid'
             }
             
         except Exception as e:
-            logger.error(f"Failed to validate calendar spread position for {symbol}: {e}")
+            logger.error(f"Failed to validate options positions for {symbol}: {e}")
             return None
 
 
@@ -1349,79 +1343,102 @@ class AlpacaClient:
                 logger.error(f"Calendar spread position validation failed for {symbol}")
                 return None
             
-            current_spread_info = self.get_calendar_spread_prices(symbol, short_exp, long_exp, option_type, 'exit')
-            if not current_spread_info:
-                logger.error(f"Could not get current spread value for {symbol}")
-                return None
-            
             # Calculate current value from the spread prices
-            current_value = current_spread_info.get('debit_cost', 0)
-            exit_price = current_value if current_value > 0 else 0.05
+            # We don't need to calculate spread prices or discover options anymore
+            # since we're just closing existing positions
             
-            # Get option symbols
-            short_options = self.discover_available_options(symbol, short_exp)
-            long_options = self.discover_available_options(symbol, long_exp)
-            
-            if not short_options or not long_options:
-                logger.error(f"Could not find options for {symbol}")
+            # Get all the actual option symbols from the validated positions
+            if not position_info.get('positions'):
+                logger.error(f"No positions found to close for {symbol}")
                 return None
             
-            current_price = self.get_current_price(symbol)
-            if not current_price:
+            # Extract option symbols from the positions
+            option_symbols = [pos['symbol'] for pos in position_info['positions']]
+            logger.info(f"Closing options positions: {option_symbols}")
+            
+            if not option_symbols:
+                logger.error(f"No option symbols found to close")
                 return None
             
-            target_strike = round(current_price)
+            # Create close orders for each option position
+            # We'll close them individually since they might have different sides
+            close_orders = []
             
-            short_call_symbol = self._find_closest_strike_option(short_options, target_strike)
-            long_call_symbol = self._find_closest_strike_option(long_options, target_strike)
-            
-            if not short_call_symbol or not long_call_symbol:
-                logger.error(f"Could not find suitable call options")
-                return None
-            
-            # Create close order data
-            close_order_data = {
-                "order_class": "mleg",
-                "qty": quantity,
-                "type": order_type,  # FIXED: Use order_type parameter instead of hardcoded "limit"
-                "time_in_force": "day",
-                "legs": [
-                    {
-                        "symbol": short_call_symbol,
+            for position in position_info['positions']:
+                option_symbol = position['symbol']
+                position_qty = abs(float(position['qty']))
+                
+                # Determine the side based on the position
+                # If qty is negative (short position), we need to buy to close
+                # If qty is positive (long position), we need to sell to close
+                if float(position['qty']) < 0:
+                    # Short position - buy to close
+                    close_orders.append({
+                        "symbol": option_symbol,
+                        "qty": position_qty,
                         "side": "buy",
-                        "intent": "buy_to_close"
-                    },
-                    {
-                        "symbol": long_call_symbol,
+                        "type": order_type,
+                        "time_in_force": "day"
+                    })
+                else:
+                    # Long position - sell to close
+                    close_orders.append({
+                        "symbol": option_symbol,
+                        "qty": position_qty,
                         "side": "sell",
-                        "intent": "sell_to_close"
-                    }
-                ]
-            }
+                        "type": order_type,
+                        "time_in_force": "day"
+                    })
+            
+            logger.info(f"Created {len(close_orders)} close orders for {symbol}")
             
             # Add limit price only for limit orders
             if order_type == "limit":
-                close_order_data["limit_price"] = exit_price
+                # For limit orders, we'll need to calculate reasonable prices
+                # For now, let's use market orders to ensure execution
+                logger.info(f"Converting to market orders for {symbol} to ensure execution")
+                for order_data in close_orders:
+                    order_data['type'] = 'market'
             
-            order = self.trading_client.submit_order(close_order_data)
+            logger.info(f"Submitting {len(close_orders)} close orders for {symbol}")
             
-            if order:
-                logger.info(f"Calendar spread close order submitted successfully for {symbol}")
+            # Submit all the orders
+            submitted_orders = []
+            for i, order_data in enumerate(close_orders):
+                try:
+                    logger.info(f"Submitting order {i+1}/{len(close_orders)}: {order_data}")
+                    order = self.trading_client.submit_order(order_data)
+                    
+                    if order and order.id:
+                        submitted_orders.append({
+                            'order_id': order.id,
+                            'status': order.status,
+                            'symbol': order_data['symbol'],
+                            'quantity': order_data['qty'],
+                            'order_type': order_data['type']
+                        })
+                        logger.info(f"Successfully submitted close order {i+1}: {order.id}")
+                    else:
+                        logger.error(f"Failed to submit close order {i+1}")
+                        
+                except Exception as e:
+                    logger.error(f"Error submitting close order {i+1}: {e}")
+            
+            if submitted_orders:
+                logger.info(f"Successfully submitted {len(submitted_orders)} out of {len(close_orders)} close orders for {symbol}")
                 return {
-                    'order_id': order.id,
+                    'order_id': submitted_orders[0]['order_id'],  # Return first order ID for compatibility
+                    'status': 'submitted',
                     'symbol': symbol,
                     'option_type': option_type,
                     'short_expiration': short_exp,
                     'long_expiration': long_exp,
-                    'strike_price': current_spread_info.get('strike_price', target_strike),
                     'quantity': quantity,
-                    'exit_price': exit_price,
-                    'current_market_value': current_value,
-                    'days_remaining': current_spread_info.get('days_between', 0),
-                    'status': 'submitted'
+                    'submitted_orders': submitted_orders,
+                    'message': f"Submitted {len(submitted_orders)} close orders"
                 }
             else:
-                logger.error(f"Failed to submit close order for {symbol}")
+                logger.error(f"Failed to submit any close orders for {symbol}")
                 return None
                 
         except Exception as e:

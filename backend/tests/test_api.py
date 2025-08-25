@@ -336,3 +336,208 @@ class TestAPI:
             setting_data = {"key": "auto_trading_enabled", "value": "true"}
             response = self.client.put("/settings", json=setting_data)
             assert response.status_code == 200
+
+    def test_execute_specific_trades(self):
+        """Test executing specific trades by ID."""
+        with patch('api.app.get_trading_scheduler') as mock_get_scheduler:
+            # Configure the get_trading_scheduler mock
+            mock_scheduler = Mock()
+            mock_get_scheduler.return_value = mock_scheduler
+            
+            # Mock the execute_specific_trades method
+            mock_scheduler.execute_specific_trades.return_value = {"success": True}
+            
+            # Test data
+            trade_ids = [1, 2, 3]
+            
+            # Make request to execute specific trades
+            response = self.client.post("/trades/execute", json={
+                "order_type": "entry",
+                "trades": [
+                    {
+                        "ticker": "AAPL",                    # ← Changed from 'symbol' to 'ticker'
+                        "earnings_date": "2024-01-15",
+                        "earnings_time": "amc",              # ← Added required field
+                        "recommendation_score": 85,           # ← Added required field
+                        "filters": {},                        # ← Added required field
+                        "reasoning": "Direct endpoint test",  # ← Added required field
+                        "status": "selected",                 # ← Added required field
+                        "trade_id": 1
+                    },
+                    {
+                        "ticker": "MSFT",                    # ← Changed from 'symbol' to 'ticker'
+                        "earnings_date": "2024-01-16",
+                        "earnings_time": "amc",              # ← Added required field
+                        "recommendation_score": 82,           # ← Added required field
+                        "filters": {},                        # ← Added required field
+                        "reasoning": "Direct endpoint test",  # ← Added required field
+                        "status": "selected",                 # ← Added required field
+                        "trade_id": 2
+                    },
+                    {
+                        "ticker": "GOOGL",                   # ← Changed from 'symbol' to 'ticker'
+                        "earnings_date": "2024-01-17", 
+                        "earnings_time": "amc",              # ← Added required field
+                        "recommendation_score": 88,           # ← Added required field
+                        "filters": {},                        # ← Added required field
+                        "reasoning": "Direct endpoint test",  # ← Added required field
+                        "status": "selected",                 # ← Added required field
+                        "trade_id": 3
+                    }
+                ]
+            })
+            
+            # Verify response
+            assert response.status_code == 200
+            data = response.json()
+            assert data["success"] is True
+            
+            # Verify the mock was called
+            mock_scheduler._execute_and_monitor_trades.assert_called_once()
+
+    def test_execute_and_monitor_trades_entry(self):
+        """Test executing and monitoring entry trades via direct endpoint."""
+        with patch('api.app.get_trading_scheduler') as mock_get_scheduler:
+            # Configure the get_trading_scheduler mock
+            mock_scheduler = Mock()
+            mock_get_scheduler.return_value = mock_scheduler
+            
+            # Mock the _execute_and_monitor_trades method
+            mock_scheduler._execute_and_monitor_trades = Mock()
+            
+            # Test data for entry trades
+            request_data = {
+                "order_type": "entry",
+                "trades": [
+                    {
+                        "ticker": "AAPL",                    # ← Changed from 'symbol' to 'ticker'
+                        "earnings_date": "2024-01-15",
+                        "earnings_time": "amc",              # ← Added required field
+                        "recommendation_score": 85,           # ← Added required field
+                        "filters": {},                        # ← Added required field
+                        "reasoning": "Direct endpoint test",  # ← Added required field
+                        "status": "selected",                 # ← Added required field
+                        "short_expiration": "2024-01-19",
+                        "long_expiration": "2024-02-16",
+                        "quantity": 1
+                    }
+                ]
+            }
+            
+            # Make request
+            response = self.client.post("/trades/execute", json=request_data)
+            
+            # Verify response
+            assert response.status_code == 200
+            data = response.json()
+            assert data["success"] is True
+            assert data["data"]["order_type"] == "entry"
+            assert data["data"]["trade_count"] == 1
+            assert "AAPL" in data["data"]["symbols"]
+            
+            # Verify the mock was called
+            mock_scheduler._execute_and_monitor_trades.assert_called_once_with(
+                request_data["trades"], "entry"
+            )
+
+    def test_execute_and_monitor_trades_exit(self):
+        """Test executing and monitoring exit trades via direct endpoint."""
+        with patch('api.app.get_trading_scheduler') as mock_get_scheduler:
+            # Configure the get_trading_scheduler mock
+            mock_scheduler = Mock()
+            mock_get_scheduler.return_value = mock_scheduler
+            
+            # Mock the _execute_and_monitor_trades method
+            mock_scheduler._execute_and_monitor_trades = Mock()
+            
+            # Test data for exit trades
+            request_data = {
+                "order_type": "exit",
+                "trades": [
+                    {
+                        "ticker": "AAPL",                    # ← Changed from 'symbol' to 'ticker'
+                        "trade_id": 123,
+                        "earnings_time": "amc",              # ← Added required field
+                        "recommendation_score": 85,           # ← Added required field
+                        "filters": {},                        # ← Added required field
+                        "reasoning": "Direct endpoint test",  # ← Added required field
+                        "status": "selected",                 # ← Added required field
+                        "short_expiration": "2024-01-19",
+                        "long_expiration": "2024-02-16",
+                        "quantity": 1
+                    }
+                ]
+            }
+            
+            # Make request
+            response = self.client.post("/trades/execute", json=request_data)
+            
+            # Verify response
+            assert response.status_code == 200
+            data = response.json()
+            assert data["success"] is True
+            assert data["data"]["order_type"] == "exit"
+            assert data["data"]["trade_count"] == 1
+            assert "AAPL" in data["data"]["symbols"]
+            
+            # Verify the mock was called
+            mock_scheduler._execute_and_monitor_trades.assert_called_once_with(
+                request_data["trades"], "exit"
+            )
+
+    def test_execute_and_monitor_trades_validation_errors(self):
+        """Test validation errors for the execute and monitor trades endpoint."""
+        with patch('api.app.get_trading_scheduler') as mock_get_scheduler:
+            # Configure the get_trading_scheduler mock
+            mock_scheduler = Mock()
+            mock_get_scheduler.return_value = mock_scheduler
+            
+            # Test missing order_type
+            response = self.client.post("/trades/execute", json={"trades": []})
+            assert response.status_code == 400
+            assert "order_type is required" in response.json()["detail"]
+            
+            # Test invalid order_type
+            response = self.client.post("/trades/execute", json={
+                "order_type": "invalid",
+                "trades": []
+            })
+            assert response.status_code == 400
+            assert "order_type must be 'entry' or 'exit'" in response.json()["detail"]
+            
+            # Test missing trades
+            response = self.client.post("/trades/execute", json={"order_type": "entry"})
+            assert response.status_code == 400
+            assert "trades must be a non-empty list" in response.json()["detail"]
+            
+            # Test empty trades list
+            response = self.client.post("/trades/execute", json={
+                "order_type": "entry",
+                "trades": []
+            })
+            assert response.status_code == 400
+            assert "trades must be a non-empty list" in response.json()["detail"]
+            
+            # Test missing ticker
+            response = self.client.post("/trades/execute", json={
+                "order_type": "entry",
+                "trades": [{"earnings_date": "2024-01-15"}]
+            })
+            assert response.status_code == 400
+            assert "must have a 'ticker' field" in response.json()["detail"]
+            
+            # Test missing earnings_date for entry
+            response = self.client.post("/trades/execute", json={
+                "order_type": "entry",
+                "trades": [{"ticker": "AAPL"}]
+            })
+            assert response.status_code == 400
+            assert "must have an 'earnings_date' field" in response.json()["detail"]
+            
+            # Test missing trade_id for exit
+            response = self.client.post("/trades/execute", json={
+                "order_type": "exit",
+                "trades": [{"ticker": "AAPL"}]
+            })
+            assert response.status_code == 400
+            assert "must have a 'trade_id' field" in response.json()["detail"]

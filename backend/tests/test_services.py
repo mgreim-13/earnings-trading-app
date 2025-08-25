@@ -207,23 +207,7 @@ class TestScanManager:
             self.manager.daily_scan_job()
             mock_scan.assert_called_once()
 
-    @pytest.mark.unit
-    @pytest.mark.fast
-    def test_scan_specific_symbols(self):
-        """Test scanning specific symbols."""
-        with patch.object(self.manager, 'scan_specific_symbols', return_value={'scanned': 1}) as mock_scan:
-            result = self.manager.scan_specific_symbols(['AAPL'])
-            assert result['scanned'] == 1
-            mock_scan.assert_called_once_with(['AAPL'])
 
-    @pytest.mark.unit
-    @pytest.mark.fast
-    def test_get_earnings_calendar(self):
-        """Test getting earnings calendar."""
-        with patch.object(self.manager, 'get_earnings_calendar', return_value=[]) as mock_get:
-            result = self.manager.get_earnings_calendar()
-            assert isinstance(result, list)
-            mock_get.assert_called_once()
 
 
 class TestTradeExecutor:

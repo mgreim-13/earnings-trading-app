@@ -25,10 +25,11 @@ logger = logging.getLogger(__name__)
 class OrderMonitorConfig:
     """Configuration for order monitoring."""
     polling_interval: int = 30  # seconds
-    max_monitoring_time: int = 8 * 60  # 8 minutes total monitoring time before market order fallback
-    entry_slippage_protection: float = 0.05  # 5% for entry orders
-    exit_slippage_protection: float = 0.10   # 10% for exit orders
-    market_order_monitoring_time: int = 2 * 60  # 2 minutes for market order monitoring
+    max_monitoring_time: int = 8 * 60  # 8 minutes total monitoring time before limit order fallback
+    price_update_threshold: float = 0.01  # 1% threshold for price updates during 0-8 minute period
+    entry_timeout_premium: float = 0.05  # 5% above midpoint for entry orders after 8 minutes
+    exit_timeout_premium: float = 0.10   # 10% above midpoint for exit orders after 8 minutes
+    market_order_monitoring_time: int = 2 * 60  # 2 minutes for timeout order monitoring
 
 class OrderMonitor:
     """
@@ -46,68 +47,8 @@ class OrderMonitor:
         self.active_monitors = {}  # trade_id -> monitor_thread
         self.scheduled_jobs = {}   # trade_id -> job_id
 
-    # ==================== SCHEDULING METHODS ====================
+    # ==================== MONITORING METHODS ====================
     
-    def schedule_entry_order_monitoring(self, trade_id: str, order_id: str, symbol: str,
-                                      short_exp: str, long_exp: str, quantity: int = 1) -> bool:
-        """Schedule entry order monitoring."""
-        try:
-            logger.info(f"Scheduling entry monitoring for {symbol} (Trade: {trade_id})")
-            
-            # Schedule monitoring to start in 30 seconds
-            monitor_start_time = datetime.now(self.et_tz) + timedelta(seconds=30)
-            
-            job_id = f"entry_monitor_{trade_id}_{order_id}"
-            
-            self.scheduler.add_job(
-                func=self.monitor_calendar_spread_entry,
-                trigger=DateTrigger(run_date=monitor_start_time),
-                args=[trade_id, order_id, symbol, short_exp, long_exp, quantity],
-                id=job_id,
-                name=f'Entry Monitor - {symbol} ({trade_id})',
-                replace_existing=True
-            )
-            
-            # Track scheduled job
-            self.scheduled_jobs[trade_id] = job_id
-            
-            logger.info(f"Scheduled entry monitoring job: {job_id}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to schedule entry monitoring for {trade_id}: {e}")
-            return False
-
-    def schedule_exit_order_monitoring(self, trade_id: str, order_id: str, symbol: str,
-                                     short_exp: str, long_exp: str, quantity: int = 1) -> bool:
-        """Schedule exit order monitoring."""
-        try:
-            logger.info(f"Scheduling exit monitoring for {symbol} (Trade: {trade_id})")
-            
-            # Schedule monitoring to start in 30 seconds
-            monitor_start_time = datetime.now(self.et_tz) + timedelta(seconds=30)
-            
-            job_id = f"exit_monitor_{trade_id}_{order_id}"
-            
-            self.scheduler.add_job(
-                func=self.monitor_calendar_spread_exit,
-                trigger=DateTrigger(run_date=monitor_start_time),
-                args=[trade_id, order_id, symbol, short_exp, long_exp, quantity],
-                id=job_id,
-                name=f'Exit Monitor - {symbol} ({trade_id})',
-                replace_existing=True
-            )
-            
-            # Track scheduled job
-            self.scheduled_jobs[trade_id] = job_id
-            
-            logger.info(f"Scheduled exit monitoring job: {job_id}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to schedule exit monitoring for {trade_id}: {e}")
-            return False
-
     def schedule_comprehensive_monitoring(self, trade_id: str, execution_result: Dict, 
                                         monitoring_type: str = 'entry') -> bool:
         """Schedule comprehensive monitoring with all advanced features."""
@@ -227,14 +168,11 @@ class OrderMonitor:
             last_price_update = start_time
             price_update_interval = timedelta(seconds=30)
             poll_count = 0
-            
-            # Get appropriate slippage protection
-            slippage_protection = (self.config.exit_slippage_protection if is_exit 
-                                 else self.config.entry_slippage_protection)
+            last_calculated_price = None  # Track the last calculated price for comparison
             
             logger.info(f"🔍 Starting {'exit' if is_exit else 'entry'} monitoring for {symbol}")
             logger.info(f"  - Max monitoring time: {self.config.max_monitoring_time // 60} minutes")
-            logger.info(f"  - Slippage protection: {slippage_protection * 100:.1f}%")
+            logger.info(f"  - Price update threshold: {self.config.price_update_threshold * 100:.1f}%")
             logger.info(f"  - Polling interval: {self.config.polling_interval} seconds")
             logger.info(f"  - Order ID: {order_id}")
             
@@ -245,9 +183,44 @@ class OrderMonitor:
                 # Check if we've exceeded max monitoring time
                 elapsed_time = (current_time - start_time).total_seconds()
                 if elapsed_time > self.config.max_monitoring_time:
-                    logger.warning(f"⏰ Max monitoring time exceeded for {symbol}, switching to market order")
-                    await self._handle_monitoring_timeout(symbol, short_exp, long_exp, option_type, is_exit, quantity)
-                    break
+                    logger.warning(f"⏰ Max monitoring time exceeded for {symbol}, attempting to place timeout limit order")
+                    timeout_order_result = await self._handle_monitoring_timeout(symbol, short_exp, long_exp, option_type, is_exit, quantity)
+                    
+                    if timeout_order_result and timeout_order_result.get('order_id'):
+                        # Continue monitoring the timeout order for 2 more minutes
+                        logger.info(f"🔄 Continuing monitoring for timeout order: {timeout_order_result['order_id']}")
+                        timeout_order_start_time = current_time
+                        timeout_order_id = timeout_order_result['order_id']
+                        
+                        # Continue monitoring loop for timeout order
+                        while True:
+                            current_time = datetime.now(self.et_tz)
+                            timeout_elapsed_time = (current_time - timeout_order_start_time).total_seconds()
+                            
+                            # Check if we've exceeded timeout order monitoring time
+                            if timeout_elapsed_time > self.config.market_order_monitoring_time:
+                                logger.warning(f"⏰ Timeout order monitoring timeout for {symbol}, executing final fallback")
+                                await self._handle_market_order_timeout(symbol, short_exp, long_exp, option_type, is_exit, quantity, timeout_order_id)
+                                break
+                            
+                            # Check timeout order status
+                            timeout_order_status = await self._check_order_status_with_retry(timeout_order_id, symbol)
+                            if timeout_order_status:
+                                status = timeout_order_status.get('status', '').lower()
+                                if status == 'filled':
+                                    logger.info(f"✅ Timeout order filled for {symbol}!")
+                                    await self._handle_order_filled(symbol, timeout_order_status, is_exit)
+                                    break
+                            
+                            # Wait before next check
+                            await asyncio.sleep(self.config.polling_interval)
+                        break
+                    else:
+                        # Timeout order placement failed, continue monitoring original order
+                        # The system will try again at the next 30-second interval
+                        logger.info(f"⏳ Timeout order placement failed for {symbol}, continuing to monitor original order")
+                        logger.info(f"⏳ Will attempt timeout order placement again at next 30-second interval")
+                        # Continue with the main monitoring loop - don't break
                 
                 logger.debug(f"🔍 Poll #{poll_count} for {symbol} (Order: {order_id}) - Elapsed: {elapsed_time:.1f}s")
                 
@@ -269,11 +242,11 @@ class OrderMonitor:
                     await self._handle_order_cancelled(symbol, order_status, is_exit)
                     break
                 
-                # Update prices periodically for slippage protection
+                # Update prices periodically for price updates (0-8 minute period)
                 if current_time - last_price_update > price_update_interval:
-                    logger.debug(f"📊 Checking slippage protection for {symbol}")
-                    await self._check_slippage_protection(symbol, short_exp, long_exp, option_type, 
-                                                      is_exit, quantity, slippage_protection, order_id)
+                    logger.debug(f"📊 Checking for price updates for {symbol}")
+                    last_calculated_price = await self._check_and_update_price(symbol, short_exp, long_exp, option_type, 
+                                                                           is_exit, quantity, order_id, start_time, last_calculated_price)
                     last_price_update = current_time
                 
                 # Wait before next check - FIXED: Use async sleep instead of blocking sleep
@@ -310,38 +283,38 @@ class OrderMonitor:
         logger.error(f"❌ Failed to get order status for {symbol} order {order_id} after {max_retries} attempts")
         return None
 
-    async def _check_slippage_protection(self, symbol: str, short_exp: str, long_exp: str,
-                                        option_type: str, is_exit: bool, quantity: int,
-                                        slippage_protection: float, order_id: str = None) -> None:
-        """Check if slippage protection should trigger and update order if needed."""
+    async def _check_and_update_price(self, symbol: str, short_exp: str, long_exp: str,
+                                     option_type: str, is_exit: bool, quantity: int,
+                                     order_id: str, start_time: datetime, last_calculated_price: Optional[float]) -> Optional[float]:
+        """Check if price has changed more than 1% and update order if needed (0-8 minute period)."""
         try:
             # Skip if no order_id provided (can't update order without ID)
             if not order_id:
-                logger.debug(f"No order_id provided for slippage protection check for {symbol}")
-                return
+                logger.debug(f"No order_id provided for price update check for {symbol}")
+                return last_calculated_price
                 
-            # Get current order details to know the original limit price
+            # Get current order details to know the current limit price
             current_order = self.client.get_order_status(order_id)
             if not current_order:
-                logger.debug(f"Could not get current order details for {order_id}, skipping slippage check")
-                return
+                logger.debug(f"Could not get current order details for {order_id}, skipping price update check")
+                return last_calculated_price
                 
             # Skip if order is already filled, cancelled, or rejected
             order_status = current_order.get('status', '').lower()
             if order_status in ['filled', 'cancelled', 'rejected', 'expired']:
-                logger.debug(f"Order {order_id} is {order_status}, skipping slippage check")
-                return
+                logger.debug(f"Order {order_id} is {order_status}, skipping price update check")
+                return last_calculated_price
                 
-            original_limit_price = current_order.get('limit_price')
-            if not original_limit_price:
-                logger.debug(f"Order {order_id} has no limit price, skipping slippage check")
-                return
+            current_limit_price = current_order.get('limit_price')
+            if not current_limit_price:
+                logger.debug(f"Order {order_id} has no limit price, skipping price update check")
+                return last_calculated_price
                 
             # Get current market prices using existing method
             current_price = self.client.get_current_price(symbol)
             if not current_price:
-                logger.debug(f"Could not get current price for {symbol}, skipping slippage check")
-                return
+                logger.debug(f"Could not get current price for {symbol}, skipping price update check")
+                return last_calculated_price
                 
             target_strike = round(current_price)
             
@@ -350,7 +323,168 @@ class OrderMonitor:
             long_options = self.client.discover_available_options(symbol, long_exp)
             
             if not short_options or not long_options:
-                logger.debug(f"Could not get options data for {symbol}, skipping slippage check")
+                logger.debug(f"Could not get options data for {symbol}, skipping price update check")
+                return last_calculated_price
+            
+            # Find the closest strike options
+            short_symbol = self.client._find_closest_strike_option(short_options, target_strike)
+            long_symbol = self.client._find_closest_strike_option(long_options, target_strike)
+            
+            if not short_symbol or not long_symbol:
+                logger.debug(f"Could not find suitable options for {symbol}, skipping price update check")
+                return last_calculated_price
+            
+            # Calculate current market prices for the spread
+            order_type = 'exit' if is_exit else 'entry'
+            current_prices = self.client.calculate_calendar_spread_limit_price(
+                long_symbol, short_symbol, order_type
+            )
+            
+            if not current_prices:
+                logger.debug(f"Could not calculate current prices for {symbol}, skipping price update check")
+                return last_calculated_price
+            
+            new_calculated_price = current_prices.get('limit_price')
+            if not new_calculated_price:
+                logger.debug(f"No current market price available for {symbol}, skipping price update check")
+                return last_calculated_price
+            
+            # If this is the first calculation, just return the price
+            if last_calculated_price is None:
+                logger.debug(f"📊 First price calculation for {symbol}: ${new_calculated_price:.2f}")
+                return new_calculated_price
+            
+            # Calculate price change as percentage difference from last calculation
+            price_diff = abs(new_calculated_price - last_calculated_price)
+            price_change_pct = price_diff / abs(last_calculated_price) if last_calculated_price != 0 else 0
+            
+            logger.debug(f"📊 Price update check for {symbol}: Last=${last_calculated_price:.2f}, Current=${new_calculated_price:.2f}, Change={price_change_pct:.1%}")
+            
+            # Check if price has changed more than 1% threshold
+            if price_change_pct > self.config.price_update_threshold:
+                logger.info(f"🔄 Price update triggered for {symbol}: {price_change_pct:.1%} > {self.config.price_update_threshold:.1%}")
+                
+                # Update the order with new calculated price (not the current limit price)
+                result = self.client.replace_order(order_id, new_calculated_price)
+                
+                if result and result.get('status') == 'replaced':
+                    logger.info(f"✅ Updated order {order_id} limit price: ${current_limit_price:.2f} → ${new_calculated_price:.2f}")
+                else:
+                    logger.warning(f"⚠️ Failed to update order {order_id} limit price")
+            else:
+                logger.debug(f"✅ Price change within threshold for {symbol}: {price_change_pct:.1%} <= {self.config.price_update_threshold:.1%}")
+            
+            return new_calculated_price
+            
+        except Exception as e:
+            logger.debug(f"⚠️ Could not check price updates for {symbol}: {e}")
+            return last_calculated_price
+
+    async def _handle_monitoring_timeout(self, symbol: str, short_exp: str, long_exp: str,
+                                       option_type: str, is_exit: bool, quantity: int) -> Optional[Dict]:
+        """Handle monitoring timeout by switching to limit order with calculated price plus percentage."""
+        try:
+            logger.warning(f"⏰ Monitoring timeout for {symbol}, attempting to place limit order with calculated price")
+            
+            # Calculate current market price using the same method as price updates
+            current_price = self.client.get_current_price(symbol)
+            if not current_price:
+                logger.warning(f"⚠️ Could not get current price for {symbol}, will retry at next interval")
+                return None
+            
+            target_strike = round(current_price)
+            
+            # Get options data for both expirations
+            short_options = self.client.discover_available_options(symbol, short_exp)
+            long_options = self.client.discover_available_options(symbol, long_exp)
+            
+            if not short_options or not long_options:
+                logger.warning(f"⚠️ Could not get options data for {symbol}, will retry at next interval")
+                return None
+            
+            # Find the closest strike options
+            short_symbol = self.client._find_closest_strike_option(short_options, target_strike)
+            long_symbol = self.client._find_closest_strike_option(long_options, target_strike)
+            
+            if not short_symbol or not long_symbol:
+                logger.warning(f"⚠️ Could not find suitable options for {symbol}, will retry at next interval")
+                return None
+            
+            # Calculate current market prices for the spread
+            order_type = 'exit' if is_exit else 'entry'
+            current_prices = self.client.calculate_calendar_spread_limit_price(
+                long_symbol, short_symbol, order_type
+            )
+            
+            if not current_prices:
+                logger.warning(f"⚠️ Could not calculate current prices for {symbol}, will retry at next interval")
+                return None
+            
+            current_market_price = current_prices.get('limit_price')
+            if not current_market_price:
+                logger.warning(f"⚠️ No current market price available for {symbol}, will retry at next interval")
+                return None
+            
+            # Calculate limit price with percentage above midpoint
+            # Entry orders: 5% above midpoint, Exit orders: 10% above midpoint
+            percentage_above = self.config.entry_timeout_premium if not is_exit else self.config.exit_timeout_premium
+            limit_price = current_market_price * (1 + percentage_above)
+            
+            logger.info(f"📊 Calculated limit price for {symbol}: Market=${current_market_price:.2f}, Limit=${limit_price:.2f} (+{percentage_above:.1%})")
+            
+            if is_exit:
+                # Close position with limit order
+                result = self.client.close_calendar_spread(
+                    symbol, short_exp, long_exp, option_type, quantity, 
+                    order_type="limit", limit_price=limit_price
+                )
+            else:
+                # Entry with limit order
+                logger.info(f"📈 Placing limit order for calendar spread entry: {symbol}")
+                result = self.client.place_calendar_spread_order(
+                    symbol=symbol,
+                    short_exp=short_exp,
+                    long_exp=long_exp,
+                    option_type=option_type,
+                    quantity=quantity,
+                    order_type="limit",
+                    limit_price=limit_price
+                )
+            
+            if result:
+                logger.info(f"✅ Limit order placed successfully for {symbol} at ${limit_price:.2f}")
+                return result
+            else:
+                logger.warning(f"⚠️ Failed to place limit order for {symbol}, will retry at next interval")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Error handling monitoring timeout for {symbol}: {e}, will retry at next interval")
+            return None
+
+    async def _handle_market_order_timeout(self, symbol: str, short_exp: str, long_exp: str,
+                                          option_type: str, is_exit: bool, quantity: int,
+                                          market_order_id: str) -> None:
+        """Handle final fallback after market order monitoring timeout with limit orders."""
+        try:
+            logger.warning(f"⏰ Final fallback for {symbol} - {'exit' if is_exit else 'entry'} with limit order")
+            
+            # Calculate current market price using the same method as slippage protection
+            current_price = self.client.get_current_price(symbol)
+            if not current_price:
+                logger.error(f"❌ Could not get current price for {symbol}, using pure market order")
+                await self._force_market_order_fallback(symbol, short_exp, long_exp, option_type, is_exit, quantity)
+                return
+            
+            target_strike = round(current_price)
+            
+            # Get options data for both expirations
+            short_options = self.client.discover_available_options(symbol, short_exp)
+            long_options = self.client.discover_available_options(symbol, long_exp)
+            
+            if not short_options or not long_options:
+                logger.error(f"❌ Could not get options data for {symbol}, using pure market order")
+                await self._force_market_order_fallback(symbol, short_exp, long_exp, option_type, is_exit, quantity)
                 return
             
             # Find the closest strike options
@@ -358,7 +492,8 @@ class OrderMonitor:
             long_symbol = self.client._find_closest_strike_option(long_options, target_strike)
             
             if not short_symbol or not long_symbol:
-                logger.debug(f"Could not find suitable options for {symbol}, skipping slippage check")
+                logger.error(f"❌ Could not find suitable options for {symbol}, using pure market order")
+                await self._force_market_order_fallback(symbol, short_exp, long_exp, option_type, is_exit, quantity)
                 return
             
             # Calculate current market prices for the spread
@@ -368,68 +503,64 @@ class OrderMonitor:
             )
             
             if not current_prices:
-                logger.debug(f"Could not calculate current prices for {symbol}, skipping slippage check")
+                logger.error(f"❌ Could not calculate current prices for {symbol}, using pure market order")
+                await self._force_market_order_fallback(symbol, short_exp, long_exp, option_type, is_exit, quantity)
                 return
             
             current_market_price = current_prices.get('limit_price')
             if not current_market_price:
-                logger.debug(f"No current market price available for {symbol}, skipping slippage check")
+                logger.error(f"❌ No current market price available for {symbol}, using pure market order")
+                await self._force_market_order_fallback(symbol, short_exp, long_exp, option_type, is_exit, quantity)
                 return
             
-            # Calculate slippage as percentage difference
-            price_diff = abs(current_market_price - original_limit_price)
-            slippage_pct = price_diff / abs(original_limit_price) if original_limit_price != 0 else 0
+            # Calculate limit price with percentage above midpoint
+            # Entry orders: 5% above midpoint, Exit orders: 10% above midpoint
+            percentage_above = self.config.entry_timeout_premium if not is_exit else self.config.exit_timeout_premium
+            limit_price = current_market_price * (1 + percentage_above)
             
-            logger.debug(f"📊 Slippage check for {symbol}: Original=${original_limit_price:.2f}, Current=${current_market_price:.2f}, Slippage={slippage_pct:.1%}")
-            
-            # Check if slippage exceeds protection threshold
-            if slippage_pct > slippage_protection:
-                logger.info(f"🚨 Slippage protection triggered for {symbol}: {slippage_pct:.1%} > {slippage_protection:.1%}")
-                
-                # Update the order with new limit price
-                result = self.client.replace_order(order_id, current_market_price)
-                
-                if result and result.get('status') == 'replaced':
-                    logger.info(f"✅ Updated order {order_id} limit price: ${original_limit_price:.2f} → ${current_market_price:.2f}")
-                else:
-                    logger.warning(f"⚠️ Failed to update order {order_id} limit price")
-            else:
-                logger.debug(f"✅ Slippage within tolerance for {symbol}: {slippage_pct:.1%} <= {slippage_protection:.1%}")
-            
-        except Exception as e:
-            logger.debug(f"⚠️ Could not check slippage protection for {symbol}: {e}")
-            return
-
-    async def _handle_monitoring_timeout(self, symbol: str, short_exp: str, long_exp: str,
-                                       option_type: str, is_exit: bool, quantity: int) -> None:
-        """Handle monitoring timeout by switching to market order."""
-        try:
-            logger.warning(f"⏰ Monitoring timeout for {symbol}, placing market order")
+            logger.info(f"📊 Final fallback calculated limit price for {symbol}: Market=${current_market_price:.2f}, Limit=${limit_price:.2f} (+{percentage_above:.1%})")
             
             if is_exit:
-                # Close position with market order - FIXED: Use market order type
+                # Exit: Place limit order with calculated price
+                logger.info(f"🚨 Force exit for {symbol} - placing limit order at ${limit_price:.2f}")
                 result = self.client.close_calendar_spread(
-                    symbol, short_exp, long_exp, option_type, quantity, order_type="market"
+                    symbol, short_exp, long_exp, option_type, quantity, 
+                    order_type="limit", limit_price=limit_price
                 )
+                if result:
+                    logger.info(f"✅ Final fallback limit exit order placed for {symbol}")
+                else:
+                    logger.error(f"❌ Failed to place final fallback limit exit order for {symbol}")
             else:
-                # Entry with market order
-                logger.info(f"📈 Placing market order for calendar spread entry: {symbol}")
-                result = self.client.place_calendar_spread_order(
-                    symbol=symbol,
-                    short_exp=short_exp,
-                    long_exp=long_exp,
-                    option_type=option_type,
-                    quantity=quantity,
-                    order_type="market"
-                )
-            
-            if result:
-                logger.info(f"✅ Market order placed successfully for {symbol}")
-            else:
-                logger.error(f"❌ Failed to place market order for {symbol}")
-                
+                # Entry: Cancel the market order and place limit order
+                logger.info(f"🚫 Force cancel for {symbol} - cancelling market order and placing limit order")
+                try:
+                    self.client.cancel_order(market_order_id)
+                    logger.info(f"✅ Market entry order cancelled for {symbol}")
+                    
+                    # Place limit order with calculated price
+                    result = self.client.place_calendar_spread_order(
+                        symbol=symbol,
+                        short_exp=short_exp,
+                        long_exp=long_exp,
+                        option_type=option_type,
+                        quantity=quantity,
+                        order_type="limit",
+                        limit_price=limit_price
+                    )
+                    
+                    if result:
+                        logger.info(f"✅ Final fallback limit entry order placed for {symbol} at ${limit_price:.2f}")
+                    else:
+                        logger.error(f"❌ Failed to place final fallback limit entry order for {symbol}")
+                        
+                except Exception as e:
+                    logger.error(f"❌ Failed to cancel market order for {symbol}: {e}")
+                    
         except Exception as e:
-            logger.error(f"❌ Error handling monitoring timeout for {symbol}: {e}")
+            logger.error(f"❌ Error in final fallback for {symbol}: {e}")
+            logger.error(f"❌ Using pure market order fallback")
+            await self._force_market_order_fallback(symbol, short_exp, long_exp, option_type, is_exit, quantity)
 
     async def _handle_order_filled(self, symbol: str, order_status: Dict, is_exit: bool) -> None:
         """Handle order filled event."""
@@ -531,85 +662,62 @@ class OrderMonitor:
         """Get list of trade IDs with active monitoring."""
         return list(self.active_monitors.keys())
 
-    def get_comprehensive_monitoring_status(self, trade_id: str) -> Optional[Dict]:
-        """Get comprehensive monitoring status for a trade."""
+    # ==================== FALLBACK HELPER METHODS ====================
+    
+    async def _fallback_to_market_order(self, symbol: str, short_exp: str, long_exp: str,
+                                       option_type: str, is_exit: bool, quantity: int) -> Dict:
+        """Fallback to market order when limit order calculation fails."""
         try:
-            # Check if monitoring is active
-            is_active = trade_id in self.active_monitors
-            thread = self.active_monitors.get(trade_id)
+            logger.warning(f"🔄 Falling back to market order for {symbol}")
             
-            # Check if job is scheduled
-            job_id = self.scheduled_jobs.get(trade_id)
-            scheduled_job = None
-            if job_id:
-                try:
-                    scheduled_job = self.scheduler.get_job(job_id)
-                except Exception:
-                    pass
-            
-            return {
-                'trade_id': trade_id,
-                'active_monitoring': is_active,
-                'thread_status': 'running' if thread and thread.is_alive() else 'completed' if thread and not thread.is_alive() else 'none',
-                'scheduled_job': {
-                    'job_id': job_id,
-                    'next_run': scheduled_job.next_run_time.isoformat() if scheduled_job and hasattr(scheduled_job, 'next_run_time') and scheduled_job.next_run_time else None,
-                    'name': scheduled_job.name if scheduled_job else None
-                } if scheduled_job else None,
-                'status': 'active' if is_active or job_id else 'inactive'
-            }
-            
-        except Exception as e:
-            logger.error(f"Error getting comprehensive monitoring status for {trade_id}: {e}")
-            return None
-
-    def get_monitoring_config_status(self) -> Dict:
-        """Get the current monitoring configuration status."""
-        try:
-            return {
-                'polling_interval': self.config.polling_interval,
-                'max_monitoring_time': self.config.max_monitoring_time,
-                'entry_slippage_protection': self.config.entry_slippage_protection,
-                'exit_slippage_protection': self.config.exit_slippage_protection,
-                'market_order_monitoring_time': self.config.market_order_monitoring_time,
-                'active_monitors_count': len(self.active_monitors),
-                'scheduled_jobs_count': len(self.scheduled_jobs),
-                'scheduler_running': self.scheduler.running if hasattr(self.scheduler, 'running') else False
-            }
-        except Exception as e:
-            logger.error(f"Error getting monitoring config status: {e}")
-            return {'error': str(e)}
-
-    def force_start_monitoring(self, trade_id: str, order_id: str, symbol: str,
-                              short_exp: str, long_exp: str, quantity: int = 1) -> bool:
-        """Force start monitoring for a trade (useful for debugging)."""
-        try:
-            logger.info(f"🔄 Force starting monitoring for {symbol} (Trade: {trade_id})")
-            
-            # Cancel any existing monitoring
-            if trade_id in self.active_monitors:
-                self.stop_order_monitoring(trade_id)
-            
-            # Schedule new monitoring immediately
-            success = self.schedule_comprehensive_monitoring(
-                trade_id=trade_id,
-                execution_result={
-                    'symbol': symbol,
-                    'order_id': order_id,
-                    'short_expiration': short_exp,
-                    'long_expiration': long_exp,
-                    'quantity': quantity
-                },
-                monitoring_type='entry'
-            )
-            
-            if success:
-                logger.info(f"✅ Force started monitoring for {symbol}")
+            if is_exit:
+                result = self.client.close_calendar_spread(
+                    symbol, short_exp, long_exp, option_type, quantity, order_type="market"
+                )
             else:
-                logger.error(f"❌ Failed to force start monitoring for {symbol}")
+                result = self.client.place_calendar_spread_order(
+                    symbol=symbol,
+                    short_exp=short_exp,
+                    long_exp=long_exp,
+                    option_type=option_type,
+                    quantity=quantity,
+                    order_type="market"
+                )
             
-            return success
-            
+            if result:
+                logger.info(f"✅ Market order fallback successful for {symbol}")
+                return result
+            else:
+                logger.error(f"❌ Market order fallback failed for {symbol}")
+                return {}
+                
         except Exception as e:
-            logger.error(f"❌ Error force starting monitoring for {symbol}: {e}")
-            return False
+            logger.error(f"❌ Error in market order fallback for {symbol}: {e}")
+            return {}
+    
+    async def _force_market_order_fallback(self, symbol: str, short_exp: str, long_exp: str,
+                                          option_type: str, is_exit: bool, quantity: int) -> None:
+        """Force fallback to market order when all else fails."""
+        try:
+            logger.warning(f"🚨 Force market order fallback for {symbol}")
+            
+            if is_exit:
+                result = self.client.close_calendar_spread(
+                    symbol, short_exp, long_exp, option_type, quantity, order_type="market"
+                )
+                if result:
+                    logger.info(f"✅ Force market exit order placed for {symbol}")
+                else:
+                    logger.error(f"❌ Failed to place force market exit order for {symbol}")
+            else:
+                # For entry, we just log that we're not placing a market order
+                logger.info(f"🚫 Force cancel for {symbol} - no market order placed for entry")
+                    
+        except Exception as e:
+            logger.error(f"❌ Error in force market order fallback for {symbol}: {e}")
+
+
+
+
+
+

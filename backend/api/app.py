@@ -894,6 +894,98 @@ async def stop_scheduler():
         logger.error(f"Failed to stop scheduler: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# Direct trade execution endpoint
+@app.post("/trades/execute")
+async def execute_and_monitor_trades(request: Dict):
+    """
+    Execute and monitor trades directly using the scheduler's _execute_and_monitor_trades method.
+    
+    This endpoint allows direct testing of calendar spread entry and exit functionality.
+    It works with all trades and monitoring functionality regardless of time or stock selection.
+    
+    Request body:
+    {
+        "order_type": "entry" | "exit",
+        "trades": [
+            {
+                "ticker": "AAPL",                    # ← Use 'ticker', not 'symbol'
+                "earnings_date": "2024-01-15",
+                "earnings_time": "amc",              # ← Should be 'amc'
+                "recommendation_score": 85,          # ← Add recommendation score
+                "filters": {},                       # ← Add filters object
+                "reasoning": "Direct endpoint test", # ← Add reasoning
+                "status": "selected",                # ← Should be 'selected'
+                "short_expiration": "2024-01-19",
+                "long_expiration": "2024-02-16",
+                "quantity": 1
+            }
+        ]
+    }
+    
+    Note: The data format must match what the automated scheduler sends to the trade executor.
+    """
+    try:
+        # Validate request
+        if not request:
+            raise HTTPException(status_code=400, detail="Request body is required")
+        
+        order_type = request.get('order_type')
+        trades = request.get('trades')
+        
+        if not order_type:
+            raise HTTPException(status_code=400, detail="order_type is required ('entry' or 'exit')")
+        
+        if order_type not in ['entry', 'exit']:
+            raise HTTPException(status_code=400, detail="order_type must be 'entry' or 'exit'")
+        
+        if not trades or not isinstance(trades, list):
+            raise HTTPException(status_code=400, detail="trades must be a non-empty list")
+        
+        if len(trades) == 0:
+            raise HTTPException(status_code=400, detail="trades list cannot be empty")
+        
+        # Validate each trade has required fields
+        for i, trade in enumerate(trades):
+            if not isinstance(trade, dict):
+                raise HTTPException(status_code=400, detail=f"Trade {i} must be a dictionary")
+            
+            if not trade.get('ticker'):  # ← Changed from 'symbol' to 'ticker'
+                raise HTTPException(status_code=400, detail=f"Trade {i} must have a 'ticker' field")
+            
+            if order_type == 'entry' and not trade.get('earnings_date'):
+                raise HTTPException(status_code=400, detail=f"Entry trade {i} must have an 'earnings_date' field")
+            
+            if order_type == 'exit' and not trade.get('trade_id'):
+                raise HTTPException(status_code=400, detail=f"Exit trade {i} must have a 'trade_id' field")
+        
+        logger.info(f"🔍 Executing {len(trades)} {order_type} trades via direct endpoint")
+        logger.info(f"   Trades: {[t.get('ticker') for t in trades]}")  # ← Changed from 'symbol' to 'ticker'
+        
+        # Get the scheduler and execute trades
+        scheduler = get_trading_scheduler()
+        
+        # Call the private method directly
+        # Note: This bypasses the normal job scheduling but maintains all execution and monitoring logic
+        scheduler._execute_and_monitor_trades(trades, order_type)
+        
+        return {
+            "success": True,
+            "message": f"Successfully initiated execution and monitoring for {len(trades)} {order_type} trades",
+            "data": {
+                "order_type": order_type,
+                "trade_count": len(trades),
+                "symbols": [t.get('ticker') for t in trades],  # ← Changed from 'symbol' to 'ticker'
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to execute trades: {e}")
+        logger.error(f"Stack trace: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to execute trades: {str(e)}")
+
 # Market data endpoints
 @app.get("/market/price/{symbol}")
 async def get_current_price(symbol: str):
@@ -1107,6 +1199,23 @@ async def debug_alpaca_activities():
             "success": True,
             "data": activities,
             "count": len(activities)
+        }
+    except Exception as e:
+        logger.error(f"Debug endpoint failed: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+@app.get("/debug/alpaca-positions")
+async def debug_alpaca_positions():
+    """Debug endpoint to see current Alpaca positions."""
+    try:
+        positions = alpaca_client.get_positions()
+        return {
+            "success": True,
+            "data": positions,
+            "count": len(positions)
         }
     except Exception as e:
         logger.error(f"Debug endpoint failed: {e}")
