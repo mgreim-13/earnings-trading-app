@@ -334,55 +334,74 @@ class AlpacaClient:
     def calculate_calendar_spread_limit_price(self, long_symbol: str, short_symbol: str, 
                                             order_type: str = 'entry') -> Optional[Dict]:
         """Calculate the limit price for calendar spread orders using the midpoint method."""
+        logger.info(f"🚀 ENTERING calculate_calendar_spread_limit_price")
+        logger.info(f"🚀 Parameters: long_symbol={long_symbol}, short_symbol={short_symbol}, order_type={order_type}")
+        
         # Validate inputs
         if not long_symbol or not short_symbol:
-            logger.error("Long symbol and short symbol are required")
+            logger.error("❌ Long symbol and short symbol are required")
             return None
         
         if not isinstance(long_symbol, str) or not isinstance(short_symbol, str):
-            logger.error("Long symbol and short symbol must be strings")
+            logger.error("❌ Long symbol and short symbol must be strings")
             return None
         
         if order_type not in ['entry', 'exit']:
-            logger.error("Order type must be 'entry' or 'exit'")
+            logger.error("❌ Order type must be 'entry' or 'exit'")
             return None
         
         try:
             # Fetch real-time bid and ask prices for both legs
+            logger.info(f"🔍 Fetching quotes for long leg: {long_symbol}")
             long_quotes = self.get_option_quotes(long_symbol)
+            logger.info(f"🔍 Fetching quotes for short leg: {short_symbol}")
             short_quotes = self.get_option_quotes(short_symbol)
             
+            logger.info(f"🔍 Long quotes result: {long_quotes}")
+            logger.info(f"🔍 Short quotes result: {short_quotes}")
+            
             if not long_quotes or not short_quotes:
-                logger.error(f"Could not fetch quotes for one or both legs")
+                logger.error(f"❌ Could not fetch quotes for one or both legs")
                 return None
             
             # Extract bid and ask prices
             long_bid, long_ask = long_quotes.get('bid'), long_quotes.get('ask')
             short_bid, short_ask = short_quotes.get('bid'), short_quotes.get('ask')
             
+            logger.info(f"🔍 Extracted prices - Long: bid=${long_bid}, ask=${long_ask}")
+            logger.info(f"🔍 Extracted prices - Short: bid=${short_bid}, ask=${short_ask}")
+            
             # Validate prices
             if not all([long_bid, long_ask, short_bid, short_ask]) or any(price <= 0 for price in [long_bid, long_ask, short_bid, short_ask]):
-                logger.error(f"Invalid pricing data for options")
+                logger.error(f"❌ Invalid pricing data for options")
+                logger.error(f"❌ Long: bid=${long_bid}, ask=${long_ask}")
+                logger.error(f"❌ Short: bid=${short_bid}, ask=${short_ask}")
                 return None
             
             # Calculate midpoints
             long_midpoint = round((long_bid + long_ask) / 2, 2)
             short_midpoint = round((short_bid + short_ask) / 2, 2)
             
+            logger.info(f"🔍 Calculated midpoints - Long: ${long_midpoint}, Short: ${short_midpoint}")
+            
             # Calculate net limit price
             if order_type.lower() == 'entry':
                 net_limit_price = round(long_midpoint - short_midpoint, 2)
                 price_description = "debit"
+                logger.info(f"🔍 Entry order: ${long_midpoint} - ${short_midpoint} = ${net_limit_price} (debit)")
             elif order_type.lower() == 'exit':
                 net_limit_price = round(short_midpoint - long_midpoint, 2)
                 price_description = "credit"
                 if net_limit_price <= 0:
                     net_limit_price = 0.05
+                    logger.info(f"🔍 Exit order: ${short_midpoint} - ${long_midpoint} = ${net_limit_price} (credit, adjusted to minimum)")
+                else:
+                    logger.info(f"🔍 Exit order: ${short_midpoint} - ${long_midpoint} = ${net_limit_price} (credit)")
             else:
-                logger.error(f"Invalid order_type: {order_type}")
+                logger.error(f"❌ Invalid order_type: {order_type}")
                 return None
             
-            return {
+            result = {
                 'limit_price': net_limit_price,
                 'limit_price_string': f"{net_limit_price:.2f}",
                 'long_symbol': long_symbol,
@@ -398,8 +417,13 @@ class AlpacaClient:
                 'timestamp': datetime.now(timezone.utc).isoformat()
             }
             
+            logger.info(f"✅ Successfully calculated limit price: {result}")
+            return result
+            
         except Exception as e:
-            logger.error(f"Error calculating limit price: {e}")
+            logger.error(f"❌ Failed to calculate calendar spread limit price: {e}")
+            import traceback
+            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
             return None
 
     def get_option_quotes(self, option_symbol: str) -> Optional[Dict]:
@@ -418,34 +442,69 @@ class AlpacaClient:
             credentials = config.get_current_alpaca_credentials()
             data_url = config.get_current_data_url()
             
-            # Use Alpaca's options quotes endpoint
-            base_url = f"{data_url}/v1beta1/options/quotes/{option_symbol}"
+            # Use Alpaca's options quotes latest endpoint with indicative feed
+            base_url = f"{data_url}/v1beta1/options/quotes/latest"
+            
+            # Query parameters: symbols (comma-separated) and feed
+            params = {
+                'symbols': option_symbol,
+                'feed': 'indicative'  # Use indicative feed for free access
+            }
             
             headers = {
                 'APCA-API-KEY-ID': credentials['api_key'],
                 'APCA-API-SECRET-KEY': credentials['secret_key']
             }
             
-            response = requests.get(base_url, headers=headers)
+            logger.info(f"🔍 Fetching quotes for {option_symbol} from {base_url}")
+            logger.info(f"🔍 Query params: {params}")
+            
+            response = requests.get(base_url, headers=headers, params=params)
+            
+            logger.info(f"🔍 Response status: {response.status_code}")
+            
+            if response.status_code != 200:
+                logger.error(f"❌ API request failed with status {response.status_code}")
+                logger.error(f"❌ Response text: {response.text}")
+                return None
+            
             response.raise_for_status()
             
             quote_data = response.json()
+            logger.info(f"🔍 Response data keys: {list(quote_data.keys()) if isinstance(quote_data, dict) else 'Not a dict'}")
             
             # Extract pricing data from the response
             if 'quotes' in quote_data and quote_data['quotes']:
-                quote = quote_data['quotes'][0]  # Get the first quote
-                return {
-                    'bid': float(quote.get('bid', 0)),
-                    'ask': float(quote.get('ask', 0)),
-                    'last': float(quote.get('last', 0)),
-                    'timestamp': quote.get('timestamp', datetime.now(timezone.utc).isoformat())
-                }
+                # The response format is: {"quotes": {"SYMBOL": {quote_data}}}
+                if option_symbol in quote_data['quotes']:
+                    quote = quote_data['quotes'][option_symbol]
+                    logger.info(f"🔍 Quote data for {option_symbol}: {quote}")
+                    
+                    # Extract fields from the quote response format
+                    # ap = ask price, bp = bid price, t = timestamp, ax = ask exchange, bx = bid exchange
+                    return {
+                        'bid': float(quote.get('bp', 0)),      # bp = bid price
+                        'ask': float(quote.get('ap', 0)),      # ap = ask price
+                        'bid_size': int(quote.get('bs', 0)),   # bs = bid size
+                        'ask_size': int(quote.get('as', 0)),   # as = ask size
+                        'bid_exchange': quote.get('bx', ''),   # bx = bid exchange
+                        'ask_exchange': quote.get('ax', ''),   # ax = ask exchange
+                        'timestamp': quote.get('t', datetime.now(timezone.utc).isoformat()),
+                        'condition': quote.get('c', '')        # c = condition
+                    }
+                else:
+                    logger.warning(f"⚠️ Option symbol {option_symbol} not found in quotes response")
+                    logger.warning(f"⚠️ Available symbols: {list(quote_data['quotes'].keys())}")
+                    return None
             else:
-                logger.warning(f"No quote data found for {option_symbol}")
+                logger.warning(f"⚠️ No quote data found for {option_symbol}")
+                logger.warning(f"⚠️ Response structure: {quote_data}")
                 return None
                 
         except Exception as e:
-            logger.warning(f"Failed to fetch real option quotes for {option_symbol}: {e}")
+            logger.warning(f"⚠️ Failed to fetch real option quotes for {option_symbol}: {e}")
+            import traceback
+            logger.warning(f"⚠️ Full traceback: {traceback.format_exc()}")
             # Return None instead of fake data to prevent production issues
             return None
 
@@ -477,6 +536,18 @@ class AlpacaClient:
                 return None
         
         try:
+            # Get current stock price to calculate strike price range
+            current_price = self.get_current_price(symbol)
+            if not current_price:
+                logger.warning(f"Could not get current price for {symbol}, using default strike range")
+                strike_min = 0
+                strike_max = 10000
+            else:
+                # Calculate strike range: ±3% from current price
+                strike_min = current_price * 0.97  # 3% below current price
+                strike_max = current_price * 1.03  # 3% above current price
+                logger.info(f"Current {symbol} price: ${current_price:.2f}, strike range: ${strike_min:.2f} - ${strike_max:.2f}")
+            
             # Get current credentials and data URL
             credentials = config.get_current_alpaca_credentials()
             data_url = config.get_current_data_url()
@@ -485,7 +556,10 @@ class AlpacaClient:
             
             params = {
                 'limit': 1000,
-                'type': 'call'
+                'type': 'call',
+                'feed': 'indicative',
+                'strike_price_gte': strike_min,
+                'strike_price_lte': strike_max
             }
             
             if target_expiration:
@@ -558,14 +632,33 @@ class AlpacaClient:
                     available_options['expirations'].add(expiration)
                     
                     if option_type == 'C':
+                        # Extract quote data from latestQuote
+                        latest_quote = option.get('latestQuote', {})
+                        latest_trade = option.get('latestTrade', {})
+                        greeks = option.get('greeks', {})
+                        
                         option_info = {
                             'occ_symbol': occ_symbol,
                             'expiration': expiration,
                             'strike': strike,
                             'type': 'call',
-                            'bid': option.get('bid', 0),
-                            'ask': option.get('ask', 0),
-                            'last': option.get('last', 0)
+                            'bid': latest_quote.get('bp', 0),  # bp = bid price
+                            'ask': latest_quote.get('ap', 0),  # ap = ask price
+                            'bid_size': latest_quote.get('bs', 0),  # bs = bid size
+                            'ask_size': latest_quote.get('as', 0),  # as = ask size
+                            'bid_exchange': latest_quote.get('bx', ''),  # bx = bid exchange
+                            'ask_exchange': latest_quote.get('ax', ''),  # ax = ask exchange
+                            'last_price': latest_trade.get('p', 0),  # p = price
+                            'last_size': latest_trade.get('s', 0),  # s = size
+                            'last_exchange': latest_trade.get('x', ''),  # x = exchange
+                            'implied_volatility': option.get('impliedVolatility', 0),
+                            'delta': greeks.get('delta', 0),
+                            'gamma': greeks.get('gamma', 0),
+                            'theta': greeks.get('theta', 0),
+                            'vega': greeks.get('vega', 0),
+                            'rho': greeks.get('rho', 0),
+                            'quote_timestamp': latest_quote.get('t', ''),
+                            'trade_timestamp': latest_trade.get('t', '')
                         }
                         available_options['call_options'].append(option_info)
         
@@ -1073,26 +1166,29 @@ class AlpacaClient:
     def find_calendar_spread_options(self, symbol: str, target_strike: float, 
                                    earnings_date: str, earnings_time: str = 'amc') -> Optional[Dict]:
         """Find available options for a calendar spread based on earnings timing."""
+        logger.info(f"🔍 find_calendar_spread_options called for {symbol}")
+        logger.info(f"📊 Parameters: target_strike={target_strike}, earnings_date={earnings_date}, earnings_time={earnings_time}")
+        
         # Validate inputs
         if not symbol or not earnings_date:
-            logger.error("Symbol and earnings_date are required")
+            logger.error("❌ Symbol and earnings_date are required")
             return None
         
         if not isinstance(symbol, str) or not isinstance(earnings_date, str):
-            logger.error("Symbol and earnings_date must be strings")
+            logger.error("❌ Symbol and earnings_date must be strings")
             return None
         
         if not isinstance(target_strike, (int, float)) or target_strike <= 0:
-            logger.error("Target strike must be a positive number")
+            logger.error("❌ Target strike must be a positive number")
             return None
         
         if earnings_time not in ['amc', 'bmo']:
-            logger.error("Earnings time must be 'amc' or 'bmo'")
+            logger.error("❌ Earnings time must be 'amc' or 'bmo'")
             return None
         
         # Validate date format (basic check)
         if len(earnings_date) != 10 or earnings_date.count('-') != 2:
-            logger.error("Invalid earnings date format. Use YYYY-MM-DD")
+            logger.error("❌ Invalid earnings date format. Use YYYY-MM-DD")
             return None
         
         try:
@@ -1113,27 +1209,46 @@ class AlpacaClient:
             target_long_exp = (next_trading_day + timedelta(days=30)).strftime('%Y-%m-%d')
             
             # Get available options
+            logger.info(f"🔍 Getting available options for {symbol}")
             available_options = self.discover_available_options(symbol)
             if not available_options:
+                logger.warning(f"⚠️ No available options returned for {symbol}")
                 return None
+            
+            logger.info(f"✅ Available options retrieved for {symbol}")
+            logger.info(f"📊 Available options keys: {list(available_options.keys()) if isinstance(available_options, dict) else 'Not a dict'}")
             
             # Find closest strike
             available_strikes = available_options['strikes']
             if not available_strikes:
+                logger.warning(f"⚠️ No available strikes found for {symbol}")
                 return None
             
+            logger.info(f"📊 Available strikes for {symbol}: {sorted(list(available_strikes))[:10]}...")  # Show first 10 strikes
+            
             closest_strike = min(available_strikes, key=lambda x: abs(x - target_strike))
+            logger.info(f"🎯 Closest strike to {target_strike} for {symbol}: {closest_strike}")
             
             # Find options at this strike
+            logger.info(f"🔍 Finding options at strike {closest_strike} for {symbol}")
             strike_options = []
-            for option in available_options['call_options']:
+            call_options = available_options.get('call_options', [])
+            logger.info(f"📊 Total call options available: {len(call_options)}")
+            
+            for option in call_options:
                 if abs(option['strike'] - closest_strike) < 0.01:
                     strike_options.append(option)
             
+            logger.info(f"📊 Options found at strike {closest_strike}: {len(strike_options)}")
+            if strike_options:
+                logger.info(f"📊 Sample option: {strike_options[0]}")
+            
             if len(strike_options) < 2:
+                logger.warning(f"⚠️ Not enough options at strike {closest_strike} for {symbol}. Found: {len(strike_options)}")
                 return None
             
             # Group by expiration and find best calendar spread
+            logger.info(f"🔍 Grouping options by expiration for {symbol}")
             expirations = {}
             for option in strike_options:
                 exp_date = datetime.strptime(option['expiration'], '%Y-%m-%d')
@@ -1145,7 +1260,11 @@ class AlpacaClient:
                     }
                 expirations[option['expiration']]['options'].append(option)
             
+            logger.info(f"📊 Expirations found: {list(expirations.keys())}")
+            logger.info(f"📊 Number of expirations: {len(expirations)}")
+            
             if len(expirations) < 2:
+                logger.warning(f"⚠️ Not enough expirations for calendar spread for {symbol}. Found: {len(expirations)}")
                 return None
             
             # Find best short expiration
@@ -1195,7 +1314,13 @@ class AlpacaClient:
             
             estimated_cost = long_option['ask'] - short_option['bid']
             
-            return {
+            logger.info(f"✅ Calendar spread options found for {symbol}")
+            logger.info(f"📊 Short option: {best_short_exp['expiration']} at strike {closest_strike}")
+            logger.info(f"📊 Long option: {best_long_exp['expiration']} at strike {closest_strike}")
+            logger.info(f"📊 Days between: {actual_days_between}")
+            logger.info(f"📊 Estimated cost: ${estimated_cost:.2f}")
+            
+            result = {
                 'symbol': symbol,
                 'strike': closest_strike,
                 'calendar_spreads': [{
@@ -1219,6 +1344,9 @@ class AlpacaClient:
                 'earnings_date': earnings_date,
                 'earnings_time': earnings_time
             }
+            
+            logger.info(f"🎯 Returning calendar spread result for {symbol}")
+            return result
             
         except Exception as e:
             logger.error(f"Error finding calendar spread options for {symbol}: {e}")

@@ -925,49 +925,70 @@ async def execute_and_monitor_trades(request: Dict):
     Note: The data format must match what the automated scheduler sends to the trade executor.
     """
     try:
+        logger.info(f"🚀 /trades/execute endpoint called")
+        logger.info(f"📊 Request body: {request}")
+        
         # Validate request
         if not request:
+            logger.error("❌ Request body is required")
             raise HTTPException(status_code=400, detail="Request body is required")
         
         order_type = request.get('order_type')
         trades = request.get('trades')
         
+        logger.info(f"📊 Extracted order_type: {order_type}")
+        logger.info(f"📊 Extracted trades: {trades}")
+        
         if not order_type:
+            logger.error("❌ order_type is required")
             raise HTTPException(status_code=400, detail="order_type is required ('entry' or 'exit')")
         
         if order_type not in ['entry', 'exit']:
+            logger.error(f"❌ Invalid order_type: {order_type}")
             raise HTTPException(status_code=400, detail="order_type must be 'entry' or 'exit'")
         
         if not trades or not isinstance(trades, list):
+            logger.error(f"❌ Invalid trades: {trades}")
             raise HTTPException(status_code=400, detail="trades must be a non-empty list")
         
         if len(trades) == 0:
+            logger.error("❌ Trades list cannot be empty")
             raise HTTPException(status_code=400, detail="trades list cannot be empty")
         
         # Validate each trade has required fields
         for i, trade in enumerate(trades):
+            logger.info(f"🔍 Validating trade {i}: {trade}")
             if not isinstance(trade, dict):
+                logger.error(f"❌ Trade {i} must be a dictionary")
                 raise HTTPException(status_code=400, detail=f"Trade {i} must be a dictionary")
             
             if not trade.get('ticker'):  # ← Changed from 'symbol' to 'ticker'
+                logger.error(f"❌ Trade {i} must have a 'ticker' field")
                 raise HTTPException(status_code=400, detail=f"Trade {i} must have a 'ticker' field")
             
             if order_type == 'entry' and not trade.get('earnings_date'):
+                logger.error(f"❌ Entry trade {i} must have an 'earnings_date' field")
                 raise HTTPException(status_code=400, detail=f"Entry trade {i} must have an 'earnings_date' field")
             
             if order_type == 'exit' and not trade.get('trade_id'):
+                logger.error(f"❌ Exit trade {i} must have a 'trade_id' field")
                 raise HTTPException(status_code=400, detail=f"Exit trade {i} must have a 'trade_id' field")
         
         logger.info(f"🔍 Executing {len(trades)} {order_type} trades via direct endpoint")
         logger.info(f"   Trades: {[t.get('ticker') for t in trades]}")  # ← Changed from 'symbol' to 'ticker'
         
         # Get the scheduler and execute trades
+        logger.info(f"🔧 Getting trading scheduler")
         scheduler = get_trading_scheduler()
+        logger.info(f"✅ Trading scheduler retrieved: {scheduler is not None}")
         
         # Call the private method directly
         # Note: This bypasses the normal job scheduling but maintains all execution and monitoring logic
+        logger.info(f"🚀 Calling scheduler._execute_and_monitor_trades with {len(trades)} trades, order_type: {order_type}")
         scheduler._execute_and_monitor_trades(trades, order_type)
+        logger.info(f"✅ scheduler._execute_and_monitor_trades completed")
         
+        logger.info(f"🎯 Returning success response for {len(trades)} {order_type} trades")
         return {
             "success": True,
             "message": f"Successfully initiated execution and monitoring for {len(trades)} {order_type} trades",
@@ -980,10 +1001,11 @@ async def execute_and_monitor_trades(request: Dict):
         }
         
     except HTTPException:
+        logger.error(f"❌ HTTPException raised: {request}")
         raise
     except Exception as e:
-        logger.error(f"Failed to execute trades: {e}")
-        logger.error(f"Stack trace: {traceback.format_exc()}")
+        logger.error(f"❌ Failed to execute trades: {e}")
+        logger.error(f"❌ Stack trace: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to execute trades: {str(e)}")
 
 # Market data endpoints

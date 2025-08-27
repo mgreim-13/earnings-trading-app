@@ -223,6 +223,9 @@ class TradingScheduler:
             order_type: Either 'entry' or 'exit' to indicate the type of order
         """
         try:
+            logger.info(f"🚀 _execute_and_monitor_trades called with {len(trade_data_list)} trades, order_type: {order_type}")
+            logger.info(f"📊 Trade data details: {[{'ticker': t.get('ticker'), 'earnings_date': t.get('earnings_date'), 'short_exp': t.get('short_expiration'), 'long_exp': t.get('long_expiration')} for t in trade_data_list]}")
+            
             if not trade_data_list:
                 logger.info(f"No trades to {order_type}")
                 return
@@ -233,23 +236,30 @@ class TradingScheduler:
             import asyncio
             import concurrent.futures
             
+            logger.info(f"🔧 Setting up ThreadPoolExecutor for {order_type} trades")
+            
             # Use ThreadPoolExecutor to run async functions in a separate thread
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 if order_type == 'entry':
+                    logger.info(f"📈 Submitting entry trade execution for {len(trade_data_list)} trades")
                     future = executor.submit(
                         asyncio.run,
                         self.trade_executor.execute_trades_with_parallel_preparation(trade_data_list)
                     )
                 else:  # exit
+                    logger.info(f"📉 Submitting exit trade execution for {len(trade_data_list)} trades")
                     future = executor.submit(
                         asyncio.run,
                         self.trade_executor.execute_exit_trades(trade_data_list)
                     )
                 
+                logger.info(f"⏳ Waiting for trade execution result (timeout: 60s)")
                 execution_result = future.result(timeout=60)  # 60 second timeout
+                logger.info(f"✅ Trade execution completed. Result: {execution_result}")
             
             # Schedule monitoring for executed trades
             if execution_result.get('success') and execution_result.get('executed_trades'):
+                logger.info(f"🎯 Scheduling monitoring for {len(execution_result['executed_trades'])} executed trades")
                 for trade_data in execution_result['executed_trades']:
                     try:
                         trade_id = str(trade_data.get('trade_id', trade_data.get('ticker', 'unknown')))
@@ -267,6 +277,8 @@ class TradingScheduler:
                     
                     except Exception as e:
                         logger.error(f"Error scheduling {order_type} monitoring for trade: {e}")
+            else:
+                logger.warning(f"⚠️ No successful trades to monitor. Execution result: {execution_result}")
             
             # Handle exit-specific logic
             if order_type == 'exit' and execution_result.get('success'):
@@ -284,7 +296,9 @@ class TradingScheduler:
                 logger.info(f"Results: {execution_result.get('message', 'No message')}")
                 
         except Exception as e:
-            logger.error(f"Error in trade {order_type} execution: {e}")
+            logger.error(f"❌ Error in trade {order_type} execution: {e}")
+            import traceback
+            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
 
     def trade_entry_job(self):
         """Execute trade entry job - delegates to trade executor."""

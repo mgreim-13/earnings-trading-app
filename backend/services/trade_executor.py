@@ -85,16 +85,19 @@ class TradeExecutor:
     def prepare_calendar_spread_trade(self, symbol: str, earning: Dict, recommendation: Dict) -> Optional[Dict]:
         """Prepare a calendar spread trade with all necessary data."""
         try:
-            logger.info(f"Preparing calendar spread trade for {symbol}")
+            logger.info(f"🔧 prepare_calendar_spread_trade called for {symbol}")
+            logger.info(f"📊 Input parameters: earning={earning}, recommendation={recommendation}")
             
             # Get current price
             try:
+                logger.info(f"💰 Getting current price for {symbol}")
                 current_price = self.alpaca_client.get_current_price(symbol)
                 if not current_price:
-                    logger.warning(f"Could not get current price for {symbol}")
+                    logger.warning(f"⚠️ Could not get current price for {symbol}")
                     return None
+                logger.info(f"✅ Current price for {symbol}: ${current_price}")
             except Exception as e:
-                logger.warning(f"Error getting current price for {symbol}: {e}")
+                logger.warning(f"⚠️ Error getting current price for {symbol}: {e}")
                 return None
             
             # Calculate ATM strike
@@ -110,6 +113,9 @@ class TradeExecutor:
             
             # Find suitable options for calendar spread
             try:
+                logger.info(f"🔍 Finding calendar spread options for {symbol}")
+                logger.info(f"📊 Parameters: target_strike={atm_strike}, earnings_date={earnings_date}, earnings_time={earnings_time}")
+                
                 calendar_options = self.alpaca_client.find_calendar_spread_options(
                     symbol=symbol,
                     target_strike=atm_strike,
@@ -117,12 +123,22 @@ class TradeExecutor:
                     earnings_time=earnings_time
                 )
                 
+                logger.info(f"🔍 Calendar options result for {symbol}: {calendar_options is not None}")
+                if calendar_options:
+                    logger.info(f"📊 Calendar options keys: {list(calendar_options.keys()) if isinstance(calendar_options, dict) else 'Not a dict'}")
+                    logger.info(f"📊 Best spread exists: {'best_spread' in calendar_options if isinstance(calendar_options, dict) else False}")
+                
                 if not calendar_options or not calendar_options.get('best_spread'):
-                    logger.warning(f"No suitable calendar spread options found for {symbol}")
+                    logger.warning(f"⚠️ No suitable calendar spread options found for {symbol}")
+                    logger.warning(f"⚠️ Calendar options: {calendar_options}")
                     return None
                     
+                logger.info(f"✅ Calendar spread options found for {symbol}")
+                    
             except Exception as e:
-                logger.warning(f"Error finding calendar spread options for {symbol}: {e}")
+                logger.warning(f"⚠️ Error finding calendar spread options for {symbol}: {e}")
+                import traceback
+                logger.warning(f"⚠️ Full traceback: {traceback.format_exc()}")
                 return None
             
             best_spread = calendar_options['best_spread']
@@ -170,8 +186,11 @@ class TradeExecutor:
         """Async version of prepare_calendar_spread_trade."""
         try:
             logger.info(f"🔍 Async trade preparation starting for {symbol}")
+            logger.info(f"📊 Input data for {symbol}: earning={earning}, recommendation={recommendation}")
+            
             # Run the synchronous method in a thread pool
             loop = asyncio.get_event_loop()
+            logger.info(f"🔧 Using event loop for {symbol}")
             result = await loop.run_in_executor(
                 None, 
                 self.prepare_calendar_spread_trade, 
@@ -182,22 +201,31 @@ class TradeExecutor:
             logger.info(f"🔍 Async trade preparation completed for {symbol}, result: {result is not None}")
             if result:
                 logger.info(f"🔍 Prepared trade fields: {list(result.keys())}")
+                logger.info(f"✅ Trade preparation successful for {symbol}")
+            else:
+                logger.warning(f"⚠️ Trade preparation returned None for {symbol}")
             return result
         except Exception as e:
-            logger.error(f"Error in async trade preparation for {symbol}: {e}")
+            logger.error(f"❌ Error in async trade preparation for {symbol}: {e}")
+            import traceback
+            logger.error(f"❌ Full traceback for {symbol}: {traceback.format_exc()}")
             return None
 
     async def prepare_trades_parallel(self, selected_trades: List[Dict]) -> List[Dict]:
         """Prepare multiple trades in parallel for better performance."""
         try:
-            logger.info(f"Preparing {len(selected_trades)} trades in parallel")
+            logger.info(f"🔧 prepare_trades_parallel called with {len(selected_trades)} trades")
+            logger.info(f"📊 Selected trades details: {[{'ticker': t.get('ticker'), 'earnings_date': t.get('earnings_date'), 'short_exp': t.get('short_expiration'), 'long_exp': t.get('long_expiration')} for t in selected_trades]}")
             
             # Create tasks for parallel execution
             tasks = []
             for trade in selected_trades:
                 symbol = trade.get('ticker')
                 if not symbol:
+                    logger.warning(f"⚠️ Trade missing ticker: {trade}")
                     continue
+                
+                logger.info(f"🔍 Processing trade for {symbol}: {trade}")
                 
                 # Get earnings data
                 earning = {
@@ -212,44 +240,60 @@ class TradeExecutor:
                     'reasoning': trade.get('reasoning', '')
                 }
                 
+                logger.info(f"📅 Earnings data for {symbol}: {earning}")
+                logger.info(f"📊 Recommendation data for {symbol}: {recommendation}")
+                
                 task = self.prepare_calendar_spread_trade_async(symbol, earning, recommendation)
                 tasks.append((symbol, task))
             
+            logger.info(f"🚀 Created {len(tasks)} parallel tasks for trade preparation")
+            
             # Execute all tasks in parallel
             results = []
+            logger.info(f"⏳ Executing {len(tasks)} tasks in parallel...")
             completed_tasks = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
+            
+            logger.info(f"✅ All parallel tasks completed. Processing results...")
             
             for i, result in enumerate(completed_tasks):
                 symbol = tasks[i][0]
                 if isinstance(result, Exception):
-                    logger.error(f"Error preparing trade for {symbol}: {result}")
+                    logger.error(f"❌ Error preparing trade for {symbol}: {result}")
+                    import traceback
+                    logger.error(f"❌ Full traceback for {symbol}: {traceback.format_exc()}")
                     continue
                 
                 if result:
                     results.append(result)
-                    logger.info(f"Successfully prepared trade for {symbol}")
+                    logger.info(f"✅ Successfully prepared trade for {symbol}: {result}")
                 else:
-                    logger.warning(f"Failed to prepare trade for {symbol}")
+                    logger.warning(f"⚠️ Failed to prepare trade for {symbol} - no result returned")
             
-            logger.info(f"Prepared {len(results)} trades out of {len(selected_trades)} selected")
+            logger.info(f"📊 Trade preparation summary: {len(results)} successful out of {len(selected_trades)} selected")
             return results
             
         except Exception as e:
-            logger.error(f"Error in parallel trade preparation: {e}")
+            logger.error(f"❌ Error in parallel trade preparation: {e}")
+            import traceback
+            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
             return []
 
     async def execute_trades_with_parallel_preparation(self, selected_trades: List[Dict]) -> Dict:
         """Execute trades with parallel preparation for improved performance."""
         start_time = datetime.now(self.et_tz)  # Initialize at the beginning
         try:
-            logger.info(f"Starting parallel trade execution for {len(selected_trades)} trades")
+            logger.info(f"🚀 execute_trades_with_parallel_preparation called with {len(selected_trades)} trades")
+            logger.info(f"📊 Input trades: {[{'ticker': t.get('ticker'), 'earnings_date': t.get('earnings_date')} for t in selected_trades]}")
             
             # Prepare trades in parallel
+            logger.info(f"🔧 Starting parallel trade preparation...")
             prepared_trades = await self.prepare_trades_parallel(selected_trades)
+            logger.info(f"📊 Trade preparation completed. Prepared {len(prepared_trades)} trades")
             
             if not prepared_trades:
-                logger.warning("No trades were successfully prepared")
+                logger.warning("⚠️ No trades were successfully prepared")
                 execution_time = (datetime.now(self.et_tz) - start_time).total_seconds()
+                logger.info(f"⏱️ Execution time: {execution_time:.2f} seconds")
                 return {
                     'success': False,
                     'message': 'No trades could be prepared for execution',
@@ -262,17 +306,23 @@ class TradeExecutor:
             executed_trades = []
             failed_trades = []
             
-            for trade_data in prepared_trades:
+            logger.info(f"🚀 Starting execution of {len(prepared_trades)} prepared trades")
+            
+            for i, trade_data in enumerate(prepared_trades):
                 try:
+                    logger.info(f"🔍 Executing trade {i+1}/{len(prepared_trades)}")
                     # Debug logging to see what fields are present
-                    logger.info(f"🔍 Executing trade with fields: {list(trade_data.keys())}")
+                    logger.info(f"🔍 Trade fields: {list(trade_data.keys())}")
                     logger.info(f"🔍 Trade data ticker: {trade_data.get('ticker', 'MISSING')}")
                     logger.info(f"🔍 Trade data symbol: {trade_data.get('symbol', 'MISSING')}")
                     
                     ticker = trade_data['ticker']  # ← Changed from 'symbol' to 'ticker'
-                    logger.info(f"Executing calendar spread for {ticker}")
+                    logger.info(f"🚀 Executing calendar spread for {ticker}")
                     
                     # Place the calendar spread order
+                    logger.info(f"📤 Placing calendar spread order for {ticker}")
+                    logger.info(f"📊 Order parameters: short_exp={trade_data['short_expiration']}, long_exp={trade_data['long_expiration']}, quantity={trade_data['position_size']}")
+                    
                     order_result = self.alpaca_client.place_calendar_spread_order(
                         symbol=ticker,  # ← Changed from 'symbol' to 'ticker'
                         short_exp=trade_data['short_expiration'],
@@ -282,6 +332,8 @@ class TradeExecutor:
                         order_type='limit'
                     )
                     
+                    logger.info(f"📊 Order result for {ticker}: {order_result}")
+                    
                     if order_result:
                         # Update trade data with order information
                         trade_data['order_id'] = order_result['order_id']
@@ -289,13 +341,15 @@ class TradeExecutor:
                         trade_data['executed_at'] = datetime.now(self.et_tz).isoformat()
                         
                         executed_trades.append(trade_data)
-                        logger.info(f"Successfully executed trade for {ticker} - Order ID: {order_result['order_id']}")  # ← Changed from 'symbol' to 'ticker'
+                        logger.info(f"✅ Successfully executed trade for {ticker} - Order ID: {order_result['order_id']}")  # ← Changed from 'symbol' to 'ticker'
                     else:
                         failed_trades.append(trade_data)
-                        logger.error(f"Failed to execute trade for {ticker}")  # ← Changed from 'symbol' to 'ticker'
+                        logger.error(f"❌ Failed to execute trade for {ticker} - no order result")  # ← Changed from 'symbol' to 'ticker'
                         
                 except Exception as e:
-                    logger.error(f"Error executing trade for {trade_data.get('ticker', 'unknown')}: {e}")  # ← Changed from 'symbol' to 'ticker'
+                    logger.error(f"❌ Error executing trade for {trade_data.get('ticker', 'unknown')}: {e}")  # ← Changed from 'symbol' to 'ticker'
+                    import traceback
+                    logger.error(f"❌ Full traceback: {traceback.format_exc()}")
                     failed_trades.append(trade_data)
             
             execution_time = (datetime.now(self.et_tz) - start_time).total_seconds()
@@ -309,13 +363,16 @@ class TradeExecutor:
                 'execution_time': execution_time
             }
             
-            logger.info(f"Trade execution completed in {execution_time:.2f} seconds")
-            logger.info(f"Results: {len(executed_trades)} executed, {len(failed_trades)} failed")
+            logger.info(f"⏱️ Trade execution completed in {execution_time:.2f} seconds")
+            logger.info(f"📊 Final results: {len(executed_trades)} executed, {len(failed_trades)} failed")
+            logger.info(f"🎯 Returning result: {result}")
             
             return result
             
         except Exception as e:
-            logger.error(f"Error in parallel trade execution: {e}")
+            logger.error(f"❌ Error in parallel trade execution: {e}")
+            import traceback
+            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
             execution_time = (datetime.now(self.et_tz) - start_time).total_seconds()
             return {
                 'success': False,
