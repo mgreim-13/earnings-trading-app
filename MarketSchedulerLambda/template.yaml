@@ -1,0 +1,213 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Market Scheduler Lambda - Conditionally triggers other lambdas based on market holidays
+
+Globals:
+  Function:
+    Timeout: 60
+    MemorySize: 256
+    Runtime: java21
+    Environment:
+      Variables:
+        FINNHUB_SECRET_NAME: !Ref FinnhubSecretName
+        SCAN_EARNINGS_LAMBDA: !Ref ScanEarningsLambdaName
+        STOCK_FILTER_LAMBDA: !Ref StockFilterLambdaName
+        INITIATE_TRADES_LAMBDA: !Ref InitiateTradesLambdaName
+        MONITOR_TRADES_LAMBDA: !Ref MonitorTradesLambdaName
+        INITIATE_EXIT_TRADES_LAMBDA: !Ref InitiateExitTradesLambdaName
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+
+  FinnhubSecretName:
+    Type: String
+    Default: finnhub-api-key
+    Description: Name of the Secrets Manager secret containing Finnhub API key
+
+  ScanEarningsLambdaName:
+    Type: String
+    Default: prod-ScanEarningsLambda
+    Description: Name of the ScanEarningsLambda function
+
+  StockFilterLambdaName:
+    Type: String
+    Default: prod-stock-filter-lambda
+    Description: Name of the StockFilterLambda function
+
+  InitiateTradesLambdaName:
+    Type: String
+    Default: InitiateTradesLambda
+    Description: Name of the InitiateTradesLambda function
+
+  MonitorTradesLambdaName:
+    Type: String
+    Default: MonitorTradesLambda
+    Description: Name of the MonitorTradesLambda function
+
+  InitiateExitTradesLambdaName:
+    Type: String
+    Default: prod-initiate-exit-trades-lambda
+    Description: Name of the InitiateExitTradesLambda function
+
+Resources:
+  # Market Scheduler Lambda Function
+  MarketSchedulerLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-market-scheduler-lambda'
+      CodeUri: target/market-scheduler-lambda-1.0.0.jar
+      Handler: com.trading.MarketSchedulerLambda::handleRequest
+      Description: Conditionally triggers other lambdas based on market holidays
+      MemorySize: 256
+      Timeout: 60
+      Environment:
+        Variables:
+          FINNHUB_SECRET_NAME: !Ref FinnhubSecretName
+          SCAN_EARNINGS_LAMBDA: !Ref ScanEarningsLambdaName
+          STOCK_FILTER_LAMBDA: !Ref StockFilterLambdaName
+          INITIATE_TRADES_LAMBDA: !Ref InitiateTradesLambdaName
+          MONITOR_TRADES_LAMBDA: !Ref MonitorTradesLambdaName
+          INITIATE_EXIT_TRADES_LAMBDA: !Ref InitiateExitTradesLambdaName
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${FinnhubSecretName}*'
+            - Effect: Allow
+              Action:
+                - lambda:InvokeFunction
+              Resource: 
+                - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ScanEarningsLambdaName}'
+                - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${StockFilterLambdaName}'
+                - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${InitiateTradesLambdaName}'
+                - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${MonitorTradesLambdaName}'
+                - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${InitiateExitTradesLambdaName}'
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: '*'
+      Events:
+        # ScanEarnings Schedule - 3:30 PM EST (M-F, non-holidays); 12:30 PM EST on early closure days
+        ScanEarningsSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(30 20 ? * MON-FRI *)  # 3:30 PM EST (8:30 PM UTC)
+            Description: Trigger ScanEarningsLambda at 3:30 PM EST on market days
+            Enabled: true
+            Input: '{"source": "scan-earnings-schedule"}'
+        ScanEarningsEarlySchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(30 17 ? * MON-FRI *)  # 12:30 PM EST (5:30 PM UTC) for early closure days
+            Description: Trigger ScanEarningsLambda at 12:30 PM EST on early closure days
+            Enabled: true
+            Input: '{"source": "scan-earnings-schedule"}'
+        
+        # StockFilter Schedule - 3:35 PM EST (M-F, non-holidays); 12:35 PM EST on early closure days
+        StockFilterSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(35 20 ? * MON-FRI *)  # 3:35 PM EST (8:35 PM UTC)
+            Description: Trigger StockFilterLambda at 3:35 PM EST on market days
+            Enabled: true
+            Input: '{"source": "stock-filter-schedule"}'
+        StockFilterEarlySchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(35 17 ? * MON-FRI *)  # 12:35 PM EST (5:35 PM UTC) for early closure days
+            Description: Trigger StockFilterLambda at 12:35 PM EST on early closure days
+            Enabled: true
+            Input: '{"source": "stock-filter-schedule"}'
+        
+        # InitiateTrades Schedule - 3:45 PM EST (M-F, non-holidays); 12:45 PM EST on early closure days
+        InitiateTradesSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(45 20 ? * MON-FRI *)  # 3:45 PM EST (8:45 PM UTC)
+            Description: Trigger InitiateTradesLambda at 3:45 PM EST on market days
+            Enabled: true
+            Input: '{"source": "initiate-trades-schedule"}'
+        InitiateTradesEarlySchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(45 17 ? * MON-FRI *)  # 12:45 PM EST (5:45 PM UTC) for early closure days
+            Description: Trigger InitiateTradesLambda at 12:45 PM EST on early closure days
+            Enabled: true
+            Input: '{"source": "initiate-trades-schedule"}'
+        
+        # MonitorTrades Schedule - Every 30 seconds during specified windows
+        MonitorTradesMorningSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(45,15 14 ? * MON-FRI *)  # 9:45:30 AM and 10:00 AM EST (2:45:30 PM and 3:00 PM UTC)
+            Description: Monitor trades every 30 seconds between 9:45:30 AM and 10:00 AM EST
+            Enabled: true
+            Input: '{"source": "monitor-trades-schedule"}'
+        MonitorTradesAfternoonSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(45,15 20 ? * MON-FRI *)  # 3:45:30 PM and 4:00 PM EST (8:45:30 PM and 9:00 PM UTC)
+            Description: Monitor trades every 30 seconds between 3:45:30 PM and 4:00 PM EST
+            Enabled: true
+            Input: '{"source": "monitor-trades-schedule"}'
+        MonitorTradesEarlyAfternoonSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(45,15 17 ? * MON-FRI *)  # 12:45:30 PM and 1:00 PM EST (5:45:30 PM and 6:00 PM UTC) for early closure days
+            Description: Monitor trades every 30 seconds between 12:45:30 PM and 1:00 PM EST on early closure days
+            Enabled: true
+            Input: '{"source": "monitor-trades-schedule"}'
+        
+        # InitiateExitTrades Schedule - 9:45 AM EST (M-F, non-holidays and early closure days)
+        InitiateExitTradesSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(45 14 ? * MON-FRI *)  # 9:45 AM EST (2:45 PM UTC)
+            Description: Trigger InitiateExitTradesLambda at 9:45 AM EST on market days
+            Enabled: true
+            Input: '{"source": "initiate-exit-trades-schedule"}'
+      Tags:
+        Environment: !Ref Environment
+        Application: TradingSystem
+        Function: MarketScheduler
+
+  # CloudWatch Log Group
+  MarketSchedulerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${Environment}-market-scheduler-lambda'
+      RetentionInDays: 30
+
+  # Finnhub API Key Secret
+  FinnhubSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Ref FinnhubSecretName
+      Description: Finnhub API key for market holiday data
+      SecretString: !Sub |
+        {
+          "apiKey": "YOUR_FINNHUB_API_KEY"
+        }
+      GenerateSecretString:
+        ExcludeCharacters: '"@/\'
+
+Outputs:
+  MarketSchedulerLambdaFunctionArn:
+    Description: 'Market Scheduler Lambda Function ARN'
+    Value: !GetAtt MarketSchedulerLambda.Arn
+    Export:
+      Name: !Sub '${Environment}-MarketSchedulerLambdaFunctionArn'
+
+  MarketSchedulerLambdaFunctionName:
+    Description: 'Market Scheduler Lambda Function Name'
+    Value: !Ref MarketSchedulerLambda
+    Export:
+      Name: !Sub '${Environment}-MarketSchedulerLambdaFunctionName'

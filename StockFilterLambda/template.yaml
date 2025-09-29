@@ -1,0 +1,191 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'Stock Filter Lambda - Filters stocks based on volume, volatility, and options data'
+
+Globals:
+  Function:
+    Timeout: 60
+    MemorySize: 512
+    Runtime: java21
+    Environment:
+      Variables:
+        EARNINGS_TABLE: !Ref EarningsTable
+        FILTERED_TABLE: !Ref FilteredTickersTable
+        VOLUME_THRESHOLD: '1000000'
+        RATIO_THRESHOLD: '1.2'
+        SLOPE_THRESHOLD: '-0.00406'
+        MIN_AVERAGE_VOLUME: '500000'
+        VOLATILITY_CRUSH_THRESHOLD: '0.85'
+        EARNINGS_STABILITY_THRESHOLD: '0.05'
+        MIN_STOCK_PRICE: '20.0'
+        MAX_STOCK_PRICE: '1000.0'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+
+Resources:
+  # Lambda Function
+  StockFilterLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-stock-filter-lambda'
+      CodeUri: target/stock-filter-lambda-1.0.0.jar
+      Handler: com.example.StockFilterLambda::handleRequest
+      Description: 'Filters stocks based on volume, volatility, and options data'
+      Timeout: 60
+      MemorySize: 512
+      Runtime: java21
+      Environment:
+        Variables:
+          EARNINGS_TABLE: !Ref EarningsTable
+          FILTERED_TABLE: !Ref FilteredTickersTable
+          VOLUME_THRESHOLD: !Ref VolumeThreshold
+          RATIO_THRESHOLD: !Ref RatioThreshold
+          SLOPE_THRESHOLD: !Ref SlopeThreshold
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref EarningsTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref FilteredTickersTable
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: '*'
+      Tags:
+        Environment: !Ref Environment
+        Service: StockFilter
+
+  # DynamoDB Table for Earnings Data
+  EarningsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${Environment}-earnings-data'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: scanDate
+          AttributeType: S
+        - AttributeName: ticker
+          AttributeType: S
+      KeySchema:
+        - AttributeName: scanDate
+          KeyType: HASH
+        - AttributeName: ticker
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: EarningsData
+
+  # DynamoDB Table for Filtered Tickers
+  FilteredTickersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${Environment}-filtered-stocks'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: scanDate
+          AttributeType: S
+        - AttributeName: ticker
+          AttributeType: S
+      KeySchema:
+        - AttributeName: scanDate
+          KeyType: HASH
+        - AttributeName: ticker
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: FilteredTickers
+
+  # CloudWatch Log Group
+  StockFilterLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${Environment}-stock-filter-lambda'
+      RetentionInDays: 14
+
+  # IAM Role for Step Functions (if needed)
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-stock-filter-stepfunctions-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt StockFilterLambdaFunction.Arn
+
+Parameters:
+  VolumeThreshold:
+    Type: Number
+    Default: 1000000
+    Description: Minimum average daily volume threshold
+    MinValue: 0
+
+  RatioThreshold:
+    Type: Number
+    Default: 1.2
+    Description: Minimum IV30/RV30 ratio threshold
+    MinValue: 0
+
+  SlopeThreshold:
+    Type: Number
+    Default: 0.0
+    Description: Minimum term structure slope threshold
+
+Outputs:
+  StockFilterLambdaFunctionArn:
+    Description: 'Stock Filter Lambda Function ARN'
+    Value: !GetAtt StockFilterLambdaFunction.Arn
+    Export:
+      Name: !Sub '${Environment}-StockFilterLambdaFunctionArn'
+
+  StockFilterLambdaFunctionName:
+    Description: 'Stock Filter Lambda Function Name'
+    Value: !Ref StockFilterLambdaFunction
+    Export:
+      Name: !Sub '${Environment}-StockFilterLambdaFunctionName'
+
+  EarningsTableName:
+    Description: 'Earnings Table Name'
+    Value: !Ref EarningsTable
+    Export:
+      Name: !Sub '${Environment}-EarningsTableName'
+
+  FilteredTickersTableName:
+    Description: 'Filtered Tickers Table Name'
+    Value: !Ref FilteredTickersTable
+    Export:
+      Name: !Sub '${Environment}-FilteredTickersTableName'
+
+  StepFunctionsRoleArn:
+    Description: 'Step Functions Role ARN'
+    Value: !GetAtt StepFunctionsRole.Arn
+    Export:
+      Name: !Sub '${Environment}-StepFunctionsRoleArn'
+

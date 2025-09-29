@@ -1,0 +1,76 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: MonitorTradesLambda - AWS Lambda function for monitoring active trading orders
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 256
+    Runtime: java21
+    Environment:
+      Variables:
+        ALPACA_SECRET_NAME: !Ref AlpacaSecretName
+        ALPACA_API_URL: https://paper-api.alpaca.markets/v2
+
+Parameters:
+  AlpacaSecretName:
+    Type: String
+    Default: alpaca-api-keys
+    Description: Name of the Secrets Manager secret containing Alpaca API keys
+
+Resources:
+  # Lambda Function
+  MonitorTradesLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: MonitorTradesLambda
+      CodeUri: target/monitor-trades-lambda-1.0.0.jar
+      Handler: com.example.MonitorTradesLambda::handleRequest
+      Description: Lambda function for monitoring active trading orders
+      MemorySize: 256
+      Timeout: 30
+      Environment:
+        Variables:
+          ALPACA_SECRET_NAME: !Ref AlpacaSecretName
+          ALPACA_API_URL: https://paper-api.alpaca.markets/v2
+      Policies:
+        - SecretsManagerReadWrite
+        - CloudWatchLogsFullAccess
+      Events:
+        # EventBridge rule for monitoring every 30 seconds during specified windows
+        MorningMonitoringSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(45,15 14 ? * MON-FRI *)  # 9:45:30 AM and 10:00 AM EST (2:45:30 PM and 3:00 PM UTC)
+            Description: Monitor trades every 30 seconds between 9:45:30 AM and 10:00 AM EST
+            Enabled: true
+        AfternoonMonitoringSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(45,15 20 ? * MON-FRI *)  # 3:45:30 PM and 4:00 PM EST (8:45:30 PM and 9:00 PM UTC)
+            Description: Monitor trades every 30 seconds between 3:45:30 PM and 4:00 PM EST
+            Enabled: true
+      Tags:
+        Environment: Production
+        Application: TradingSystem
+        Function: MonitorTrades
+
+  # CloudWatch Log Group
+  MonitorTradesLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${MonitorTradesLambda}'
+      RetentionInDays: 30
+
+Outputs:
+  MonitorTradesLambdaArn:
+    Description: ARN of the MonitorTradesLambda function
+    Value: !GetAtt MonitorTradesLambda.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-MonitorTradesLambdaArn'
+
+  MonitorTradesLambdaFunctionName:
+    Description: Name of the MonitorTradesLambda function
+    Value: !Ref MonitorTradesLambda
+    Export:
+      Name: !Sub '${AWS::StackName}-MonitorTradesLambdaFunctionName'

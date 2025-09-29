@@ -1,0 +1,159 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'Scan Earnings Lambda Function'
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 256
+    Runtime: java21
+    Environment:
+      Variables:
+        FINNHUB_API_URL: https://finnhub.io/api/v1/calendar/earnings
+        FINNHUB_SECRET_NAME: finnhub-api-key
+        DYNAMODB_TABLE: !Ref EarningsTable
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+
+Resources:
+  # DynamoDB Table
+  EarningsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${Environment}-earnings-data'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: scanDate
+          AttributeType: S
+        - AttributeName: ticker
+          AttributeType: S
+      KeySchema:
+        - AttributeName: scanDate
+          KeyType: HASH
+        - AttributeName: ticker
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: TradingEarnings
+
+  # Lambda Function
+  ScanEarningsLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-ScanEarningsLambda'
+      CodeUri: target/scan-earnings-lambda-1.0.0.jar
+      Handler: com.trading.ScanEarningsLambda::handleRequest
+      Description: 'Lambda function for scanning earnings data from Finnhub API'
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref EarningsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref EarningsTable
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource:
+                - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:finnhub-api-key*'
+        - CloudWatchLogsFullAccess
+      Tags:
+        Environment: !Ref Environment
+        Application: TradingEarnings
+
+  # Step Functions State Machine (Optional)
+  EarningsScanStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub '${Environment}-EarningsScanStateMachine'
+      DefinitionUri: step-functions/earnings-scan.json
+      DefinitionSubstitutions:
+        LambdaFunctionArn: !GetAtt ScanEarningsLambda.Arn
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ScanEarningsLambda
+      Tags:
+        Environment: !Ref Environment
+        Application: TradingEarnings
+
+  # CloudWatch Log Group
+  ScanEarningsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${Environment}-ScanEarningsLambda'
+      RetentionInDays: 14
+
+  # IAM Role for Lambda (if needed for additional permissions)
+  ScanEarningsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-ScanEarningsLambdaRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt EarningsTable.Arn
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:finnhub-api-key*'
+
+Outputs:
+  ScanEarningsLambdaArn:
+    Description: 'ARN of the Scan Earnings Lambda function'
+    Value: !GetAtt ScanEarningsLambda.Arn
+    Export:
+      Name: !Sub '${Environment}-ScanEarningsLambdaArn'
+
+  EarningsTableName:
+    Description: 'Name of the DynamoDB table'
+    Value: !Ref EarningsTable
+    Export:
+      Name: !Sub '${Environment}-EarningsTableName'
+
+  EarningsTableArn:
+    Description: 'ARN of the DynamoDB table'
+    Value: !GetAtt EarningsTable.Arn
+    Export:
+      Name: !Sub '${Environment}-EarningsTableArn'
+
+  StepFunctionsStateMachineArn:
+    Description: 'ARN of the Step Functions state machine'
+    Value: !GetAtt EarningsScanStateMachine.Arn
+    Export:
+      Name: !Sub '${Environment}-EarningsScanStateMachineArn'

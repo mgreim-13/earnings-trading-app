@@ -1,0 +1,7 @@
+{
+  "ScanEarningsLambda": {
+    "FINNHUB_API_URL": "https://finnhub.io/api/v1/calendar/earnings",
+    "FINNHUB_SECRET_NAME": "finnhub-api-key",
+    "DYNAMODB_TABLE": "EarningsTable"
+  }
+}

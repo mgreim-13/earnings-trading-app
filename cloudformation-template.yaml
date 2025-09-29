@@ -1,0 +1,692 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Trading Lambda Infrastructure - Lightweight and Cost-Optimized'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues: ['dev', 'prod']
+    Description: 'Environment name'
+  
+  AlpacaSecretName:
+    Type: String
+    Default: 'trading/alpaca/credentials'
+    Description: 'AWS Secrets Manager secret name for Alpaca credentials'
+  
+  FinnhubSecretName:
+    Type: String
+    Default: 'trading/finnhub/credentials'
+    Description: 'AWS Secrets Manager secret name for Finnhub credentials'
+  
+  VpcId:
+    Type: String
+    Default: ''
+    Description: 'VPC ID for Lambda functions (optional - leave empty for default VPC)'
+  
+  SubnetIds:
+    Type: CommaDelimitedList
+    Default: ''
+    Description: 'Subnet IDs for Lambda functions (optional - leave empty for default VPC)'
+  
+  S3BucketName:
+    Type: String
+    Default: 'trading-lambdas-dev-1759098981'
+    Description: 'S3 bucket name containing Lambda deployment packages'
+
+Conditions:
+  HasVpcConfig: !Not [!Equals [!Ref VpcId, '']]
+
+Resources:
+  # VPC Configuration for enhanced security
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Trading Lambda functions
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-trading-lambda-sg'
+
+  # IAM Role for all Lambdas
+  TradingLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-trading-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: TradingLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Secrets Manager access
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AlpacaSecretName}*'
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${FinnhubSecretName}*'
+              
+              # DynamoDB access - Dynamic table creation
+              - Effect: Allow
+                Action:
+                  - dynamodb:CreateTable
+                  - dynamodb:DescribeTable
+                  - dynamodb:ListTables
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Environment}-*'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Environment}-*/index/*'
+              
+              # Lambda invocation
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${Environment}-*'
+              
+              # SQS access for Dead Letter Queue
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:GetQueueAttributes
+                Resource:
+                  - !GetAtt DeadLetterQueue.Arn
+              
+              # EventBridge access for rule management
+              - Effect: Allow
+                Action:
+                  - events:PutRule
+                  - events:PutTargets
+                  - events:DeleteRule
+                  - events:RemoveTargets
+                  - events:ListTargetsByRule
+                  - events:EnableRule
+                  - events:DisableRule
+                  - events:DescribeRule
+                  - events:ListRules
+                Resource: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/dev-*'
+
+  # DynamoDB Tables - Created dynamically by MarketSchedulerLambda
+  # Tables are created only on market-open days, 5 minutes before ScanEarningsLambda runs
+
+  # Lambda Functions
+  MarketSchedulerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-market-scheduler'
+      Runtime: java21
+      Handler: com.trading.MarketSchedulerLambda::handleRequest
+      Code:
+        S3Bucket: !Ref S3BucketName
+        S3Key: market-scheduler-lambda-1.0.0.jar
+      Role: !GetAtt TradingLambdaRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          SCAN_EARNINGS_LAMBDA: !Ref ScanEarningsLambda
+          STOCK_FILTER_LAMBDA: !Ref StockFilterLambda
+          INITIATE_TRADES_LAMBDA: !Ref InitiateTradesLambda
+          MONITOR_TRADES_LAMBDA: !Ref MonitorTradesLambda
+          INITIATE_EXIT_TRADES_LAMBDA: !Ref InitiateExitTradesLambda
+          FINNHUB_SECRET_NAME: !Ref FinnhubSecretName
+          ALPACA_SECRET_NAME: !Ref AlpacaSecretName
+          EARNINGS_TABLE: !Sub '${Environment}-earnings-data'
+          FILTERED_STOCKS_TABLE: !Sub '${Environment}-filtered-stocks'
+      VpcConfig:
+        !If
+          - HasVpcConfig
+          - SecurityGroupIds:
+              - !Ref LambdaSecurityGroup
+            SubnetIds: !Ref SubnetIds
+          - !Ref AWS::NoValue
+      DeadLetterConfig:
+        TargetArn: !GetAtt DeadLetterQueue.Arn
+
+  ScanEarningsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-scan-earnings'
+      Runtime: java21
+      Handler: com.trading.ScanEarningsLambda::handleRequest
+      Code:
+        S3Bucket: !Ref S3BucketName
+        S3Key: scan-earnings-lambda-1.0.0.jar
+      Role: !GetAtt TradingLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Sub '${Environment}-earnings-data'
+          FINNHUB_SECRET_NAME: !Ref FinnhubSecretName
+          ALPACA_SECRET_NAME: !Ref AlpacaSecretName
+          FINNHUB_API_URL: 'https://finnhub.io/api/v1/calendar/earnings'
+
+  StockFilterLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-stock-filter'
+      Runtime: java21
+      Handler: com.example.StockFilterLambda::handleRequest
+      Code:
+        S3Bucket: !Ref S3BucketName
+        S3Key: stock-filter-lambda-1.0.0.jar
+      Role: !GetAtt TradingLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Sub '${Environment}-filtered-stocks'
+          ALPACA_SECRET_NAME: !Ref AlpacaSecretName
+
+  InitiateTradesLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-initiate-trades'
+      Runtime: java21
+      Handler: com.example.InitiateTradesLambda::handleRequest
+      Code:
+        S3Bucket: !Ref S3BucketName
+        S3Key: initiate-trades-lambda-1.0.0.jar
+      Role: !GetAtt TradingLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          ALPACA_SECRET_NAME: !Ref AlpacaSecretName
+          PAPER_TRADING: 'true'
+
+  MonitorTradesLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-monitor-trades'
+      Runtime: java21
+      Handler: com.example.MonitorTradesLambda::handleRequest
+      Code:
+        S3Bucket: !Ref S3BucketName
+        S3Key: monitor-trades-lambda-1.0.0.jar
+      Role: !GetAtt TradingLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          ALPACA_SECRET_NAME: !Ref AlpacaSecretName
+
+  InitiateExitTradesLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-initiate-exit-trades'
+      Runtime: java21
+      Handler: com.trading.lambda.InitiateExitTradesLambda::handleRequest
+      Code:
+        S3Bucket: !Ref S3BucketName
+        S3Key: initiate-exit-trades-lambda-1.0.0.jar
+      Role: !GetAtt TradingLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          ALPACA_SECRET_NAME: !Ref AlpacaSecretName
+          PAPER_TRADING: 'true'
+
+  # Market Scheduler Rule - Runs at 6:00 AM EST to configure daily scheduling
+  MarketSchedulerRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-market-scheduler-rule'
+      Description: 'Triggers MarketSchedulerLambda at 6 AM EST on weekdays to configure daily scheduling'
+      ScheduleExpression: 'cron(0 6 ? * MON-FRI *)'  # 6 AM EST = 11 AM UTC
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt MarketSchedulerLambda.Arn
+          Id: 'MarketSchedulerTarget'
+          Input: '{"source": "daily-schedule"}'
+
+  # Table Creation Rules - 5 minutes before ScanEarningsLambda
+  # Normal Day Table Creation (3:25 PM EST)
+  TableCreationNormalRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-table-creation-normal-rule'
+      Description: 'Creates DynamoDB tables 5 minutes before normal day ScanEarningsLambda runs'
+      ScheduleExpression: 'cron(25 20 ? * MON-FRI *)'  # 3:25 PM EST = 8:25 PM UTC
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt MarketSchedulerLambda.Arn
+          Id: 'TableCreationNormalTarget'
+          Input: '{"source": "create-tables", "dayType": "normal"}'
+
+  # Early Closure Day Table Creation (12:25 PM EST)
+  TableCreationEarlyRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-table-creation-early-rule'
+      Description: 'Creates DynamoDB tables 5 minutes before early closure ScanEarningsLambda runs'
+      ScheduleExpression: 'cron(25 17 ? * MON-FRI *)'  # 12:25 PM EST = 5:25 PM UTC
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt MarketSchedulerLambda.Arn
+          Id: 'TableCreationEarlyTarget'
+          Input: '{"source": "create-tables", "dayType": "early"}'
+
+  # Normal Trading Day Rules
+  NormalScanEarningsRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-normal-scan-earnings-rule'
+      Description: 'Triggers ScanEarningsLambda at 3:30 PM EST on normal trading days'
+      ScheduleExpression: 'cron(30 15 ? * MON-FRI *)'  # 3:30 PM EST = 8:30 PM UTC
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ScanEarningsLambda.Arn
+          Id: 'NormalScanEarningsTarget'
+          Input: '{"source": "scan-earnings-schedule"}'
+
+  NormalStockFilterRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-normal-stock-filter-rule'
+      Description: 'Triggers StockFilterLambda at 3:35 PM EST on normal trading days'
+      ScheduleExpression: 'cron(35 15 ? * MON-FRI *)'  # 3:35 PM EST = 8:35 PM UTC
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt StockFilterLambda.Arn
+          Id: 'NormalStockFilterTarget'
+          Input: '{"source": "stock-filter-schedule"}'
+
+  NormalInitiateTradesRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-normal-initiate-trades-rule'
+      Description: 'Triggers InitiateTradesLambda at 3:45 PM EST on normal trading days'
+      ScheduleExpression: 'cron(45 15 ? * MON-FRI *)'  # 3:45 PM EST = 8:45 PM UTC
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt InitiateTradesLambda.Arn
+          Id: 'NormalInitiateTradesTarget'
+          Input: '{"source": "initiate-trades-schedule"}'
+
+  NormalInitiateExitTradesRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-normal-initiate-exit-trades-rule'
+      Description: 'Triggers InitiateExitTradesLambda at 9:45 AM EST on normal trading days'
+      ScheduleExpression: 'cron(45 9 ? * MON-FRI *)'  # 9:45 AM EST = 2:45 PM UTC
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt InitiateExitTradesLambda.Arn
+          Id: 'NormalInitiateExitTradesTarget'
+          Input: '{"source": "initiate-exit-trades-schedule"}'
+
+  # MonitorTradesLambda runs every 30 seconds during specified windows
+  # Normal Day Morning Window (9:45:30-10:00 AM EST) - Every 30 seconds
+  NormalMonitorTradesRule1:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-normal-monitor-trades-rule-1'
+      Description: 'Triggers MonitorTradesLambda every 30 seconds during 9:45:30-10:00 AM EST on normal trading days'
+      ScheduleExpression: 'cron(*/30 14-15 ? * MON-FRI *)'  # Every 30 seconds from 2:45-3:00 PM UTC (9:45-10:00 AM EST)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt MonitorTradesLambda.Arn
+          Id: 'NormalMonitorTradesTarget1'
+          Input: '{"source": "monitor-trades-schedule", "window": "morning", "dayType": "normal"}'
+
+  # Normal Day Afternoon Window (3:45:30-4:00 PM EST) - Every 30 seconds
+  NormalMonitorTradesRule2:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-normal-monitor-trades-rule-2'
+      Description: 'Triggers MonitorTradesLambda every 30 seconds during 3:45:30-4:00 PM EST on normal trading days'
+      ScheduleExpression: 'cron(*/30 20-21 ? * MON-FRI *)'  # Every 30 seconds from 8:45-9:00 PM UTC (3:45-4:00 PM EST)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt MonitorTradesLambda.Arn
+          Id: 'NormalMonitorTradesTarget2'
+          Input: '{"source": "monitor-trades-schedule", "window": "afternoon", "dayType": "normal"}'
+
+
+  # Early Closure Day Rules
+  EarlyScanEarningsRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-early-scan-earnings-rule'
+      Description: 'Triggers ScanEarningsLambda at 12:30 PM EST on early closure days'
+      ScheduleExpression: 'cron(30 12 ? * MON-FRI *)'  # 12:30 PM EST = 5:30 PM UTC
+      State: DISABLED  # Will be enabled dynamically
+      Targets:
+        - Arn: !GetAtt ScanEarningsLambda.Arn
+          Id: 'EarlyScanEarningsTarget'
+          Input: '{"source": "scan-earnings-schedule"}'
+
+  EarlyStockFilterRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-early-stock-filter-rule'
+      Description: 'Triggers StockFilterLambda at 12:35 PM EST on early closure days'
+      ScheduleExpression: 'cron(35 12 ? * MON-FRI *)'  # 12:35 PM EST = 5:35 PM UTC
+      State: DISABLED  # Will be enabled dynamically
+      Targets:
+        - Arn: !GetAtt StockFilterLambda.Arn
+          Id: 'EarlyStockFilterTarget'
+          Input: '{"source": "stock-filter-schedule"}'
+
+  EarlyInitiateTradesRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-early-initiate-trades-rule'
+      Description: 'Triggers InitiateTradesLambda at 12:45 PM EST on early closure days'
+      ScheduleExpression: 'cron(45 12 ? * MON-FRI *)'  # 12:45 PM EST = 5:45 PM UTC
+      State: DISABLED  # Will be enabled dynamically
+      Targets:
+        - Arn: !GetAtt InitiateTradesLambda.Arn
+          Id: 'EarlyInitiateTradesTarget'
+          Input: '{"source": "initiate-trades-schedule"}'
+
+  EarlyInitiateExitTradesRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-early-initiate-exit-trades-rule'
+      Description: 'Triggers InitiateExitTradesLambda at 9:45 AM EST on early closure days'
+      ScheduleExpression: 'cron(45 9 ? * MON-FRI *)'  # 9:45 AM EST = 2:45 PM UTC
+      State: DISABLED  # Will be enabled dynamically
+      Targets:
+        - Arn: !GetAtt InitiateExitTradesLambda.Arn
+          Id: 'EarlyInitiateExitTradesTarget'
+          Input: '{"source": "initiate-exit-trades-schedule"}'
+
+  # Early closure MonitorTradesLambda rules
+  # Early Closure Day Morning Window (9:45:30-10:00 AM EST) - Every 30 seconds
+  EarlyMonitorTradesRule1:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-early-monitor-trades-rule-1'
+      Description: 'Triggers MonitorTradesLambda every 30 seconds during 9:45:30-10:00 AM EST on early closure days'
+      ScheduleExpression: 'cron(*/30 14-15 ? * MON-FRI *)'  # Every 30 seconds from 2:45-3:00 PM UTC (9:45-10:00 AM EST)
+      State: DISABLED  # Will be enabled dynamically
+      Targets:
+        - Arn: !GetAtt MonitorTradesLambda.Arn
+          Id: 'EarlyMonitorTradesTarget1'
+          Input: '{"source": "monitor-trades-schedule", "window": "morning", "dayType": "early"}'
+
+  # Early Closure Day Afternoon Window (12:45:30-1:00 PM EST) - Every 30 seconds
+  EarlyMonitorTradesRule2:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-early-monitor-trades-rule-2'
+      Description: 'Triggers MonitorTradesLambda every 30 seconds during 12:45:30-1:00 PM EST on early closure days'
+      ScheduleExpression: 'cron(*/30 17-18 ? * MON-FRI *)'  # Every 30 seconds from 5:45-6:00 PM UTC (12:45-1:00 PM EST)
+      State: DISABLED  # Will be enabled dynamically
+      Targets:
+        - Arn: !GetAtt MonitorTradesLambda.Arn
+          Id: 'EarlyMonitorTradesTarget2'
+          Input: '{"source": "monitor-trades-schedule", "window": "afternoon", "dayType": "early"}'
+
+  # Table Cleanup Rules - 30 minutes after ScanEarningsLambda
+  # Early Closure Cleanup (1:00 PM EST)
+  TableCleanupEarlyRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-table-cleanup-early-rule'
+      Description: 'Cleans up DynamoDB tables 30 minutes after early closure ScanEarningsLambda'
+      ScheduleExpression: 'cron(0 18 ? * MON-FRI *)'  # 1:00 PM EST
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt MarketSchedulerLambda.Arn
+          Id: 'TableCleanupEarlyTarget'
+          Input: '{"source": "cleanup-tables-early"}'
+
+  # Normal Day Cleanup (4:00 PM EST)
+  TableCleanupNormalRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-table-cleanup-normal-rule'
+      Description: 'Cleans up DynamoDB tables 30 minutes after normal day ScanEarningsLambda'
+      ScheduleExpression: 'cron(0 21 ? * MON-FRI *)'  # 4:00 PM EST
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt MarketSchedulerLambda.Arn
+          Id: 'TableCleanupNormalTarget'
+          Input: '{"source": "cleanup-tables-normal"}'
+
+  # Lambda Permissions for EventBridge
+  MarketSchedulerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MarketSchedulerLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt MarketSchedulerRule.Arn
+
+  TableCreationNormalPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MarketSchedulerLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt TableCreationNormalRule.Arn
+
+  TableCreationEarlyPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MarketSchedulerLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt TableCreationEarlyRule.Arn
+
+  # Normal Trading Day Lambda Permissions
+  NormalScanEarningsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ScanEarningsLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NormalScanEarningsRule.Arn
+
+  NormalStockFilterPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StockFilterLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NormalStockFilterRule.Arn
+
+  NormalInitiateTradesPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref InitiateTradesLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NormalInitiateTradesRule.Arn
+
+  NormalInitiateExitTradesPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref InitiateExitTradesLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NormalInitiateExitTradesRule.Arn
+
+  NormalMonitorTradesPermission1:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MonitorTradesLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NormalMonitorTradesRule1.Arn
+
+  NormalMonitorTradesPermission2:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MonitorTradesLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NormalMonitorTradesRule2.Arn
+
+  # Early Closure Day Lambda Permissions
+  EarlyScanEarningsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ScanEarningsLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EarlyScanEarningsRule.Arn
+
+  EarlyStockFilterPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StockFilterLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EarlyStockFilterRule.Arn
+
+  EarlyInitiateTradesPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref InitiateTradesLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EarlyInitiateTradesRule.Arn
+
+  EarlyInitiateExitTradesPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref InitiateExitTradesLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EarlyInitiateExitTradesRule.Arn
+
+  EarlyMonitorTradesPermission1:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MonitorTradesLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EarlyMonitorTradesRule1.Arn
+
+  EarlyMonitorTradesPermission2:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MonitorTradesLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EarlyMonitorTradesRule2.Arn
+
+  TableCleanupEarlyPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MarketSchedulerLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt TableCleanupEarlyRule.Arn
+
+  TableCleanupNormalPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MarketSchedulerLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt TableCleanupNormalRule.Arn
+
+  # SNS Topic for Alerts
+  TradingAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${Environment}-trading-alerts'
+      DisplayName: 'Trading System Alerts'
+
+  # SNS Subscription
+  TradingAlertsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      TopicArn: !Ref TradingAlertsTopic
+      Endpoint: mgreim3373@gmail.com
+
+  # CloudWatch Alarms for monitoring
+  MarketSchedulerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-market-scheduler-errors'
+      AlarmDescription: 'Market Scheduler Lambda errors'
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MarketSchedulerLambda
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref TradingAlertsTopic
+
+  MarketSchedulerDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-market-scheduler-duration'
+      AlarmDescription: 'Market Scheduler Lambda duration too high'
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 45000  # 45 seconds
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MarketSchedulerLambda
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref TradingAlertsTopic
+
+  # Dead Letter Queue for failed invocations
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${Environment}-trading-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days
+      VisibilityTimeoutSeconds: 60
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: DeadLetterQueue
+
+Outputs:
+  MarketSchedulerLambdaArn:
+    Description: 'Market Scheduler Lambda ARN'
+    Value: !GetAtt MarketSchedulerLambda.Arn
+    Export:
+      Name: !Sub '${Environment}-MarketSchedulerLambdaArn'
+  
+  EarningsDataTableName:
+    Description: 'Earnings Data DynamoDB Table Name (created dynamically)'
+    Value: !Sub '${Environment}-earnings-data'
+    Export:
+      Name: !Sub '${Environment}-EarningsDataTableName'
+  
+  FilteredStocksTableName:
+    Description: 'Filtered Stocks DynamoDB Table Name (created dynamically)'
+    Value: !Sub '${Environment}-filtered-stocks'
+    Export:
+      Name: !Sub '${Environment}-FilteredStocksTableName'

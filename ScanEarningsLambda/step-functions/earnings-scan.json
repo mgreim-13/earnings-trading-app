@@ -1,0 +1,57 @@
+{
+  "Comment": "Earnings scan workflow using Step Functions",
+  "StartAt": "CheckMarketStatus",
+  "States": {
+    "CheckMarketStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${Environment}-ScanEarningsLambda",
+      "Comment": "Check if market is open and scan earnings if it is",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "HandleError",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "CheckResult"
+    },
+    "CheckResult": {
+      "Type": "Choice",
+      "Comment": "Check if the scan was successful",
+      "Choices": [
+        {
+          "Variable": "$.status",
+          "StringEquals": "success",
+          "Next": "Success"
+        }
+      ],
+      "Default": "HandleError"
+    },
+    "Success": {
+      "Type": "Pass",
+      "Comment": "Earnings scan completed successfully",
+      "Result": {
+        "status": "success",
+        "message": "Earnings scan workflow completed successfully"
+      },
+      "End": true
+    },
+    "HandleError": {
+      "Type": "Pass",
+      "Comment": "Handle any errors that occurred during the scan",
+      "Result": {
+        "status": "error",
+        "message": "Earnings scan workflow failed"
+      },
+      "End": true
+    }
+  }
+}
