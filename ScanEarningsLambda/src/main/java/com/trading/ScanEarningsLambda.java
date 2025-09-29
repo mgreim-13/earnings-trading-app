@@ -12,8 +12,6 @@ import software.amazon.awssdk.services.dynamodb.model.WriteRequest;
 
 import java.io.IOException;
 import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -62,7 +60,7 @@ public class ScanEarningsLambda implements RequestHandler<Map<String, Object>, S
             context.getLogger().log("Current date (EST): " + today);
             
             // Get API key and check market status
-            String finnhubApiKey = getApiKey(getFinnhubSecret()).get("key");
+            String finnhubApiKey = TradingCommonUtils.getAlpacaCredentials(getFinnhubSecret()).getApiKey();
             if (finnhubApiKey == null) {
                 throw new RuntimeException("Failed to retrieve Finnhub API key from Secrets Manager");
             }

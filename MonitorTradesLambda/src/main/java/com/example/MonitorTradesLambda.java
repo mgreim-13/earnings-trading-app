@@ -16,6 +16,10 @@ import java.util.*;
 /**
  * AWS Lambda function for monitoring active trading orders.
  * Monitors entry and exit orders every 30 seconds for 15 minutes with time-based logic.
+ * 
+ * TEMPORARY CHANGE: In Phase 2 (minutes 10-12), entry orders are now converted to market orders
+ * instead of being canceled. This ensures we get filled on entry orders after 10 minutes
+ * instead of giving up. The original cancellation logic is commented out for easy reversion.
  */
 public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, String> {
     
@@ -27,11 +31,7 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
     private static final ZoneId EST_ZONE = ZoneId.of("America/New_York");
     private static final int FIRST_PHASE_MINUTES = 10;
     private static final int SECOND_PHASE_MINUTES = 13;
-    private static final int CONTRACT_QUANTITY = 1;
     private static final int DECIMAL_PLACES = 2;
-    private static final int HTTP_OK = 200;
-    private static final int HTTP_CREATED = 201;
-    private static final int HTTP_NO_CONTENT = 204;
     
     public MonitorTradesLambda() {
         // No initialization needed - using shared utilities
@@ -76,6 +76,7 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
             int ordersUpdated = 0;
             int ordersCanceled = 0;
             int ordersConverted = 0;
+            int entryOrdersConverted = 0; // Track entry orders converted to market orders
             
             // Process each open order
             for (Map<String, Object> order : openOrders) {
@@ -127,11 +128,26 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
                             }
                         }
                     } else if (minutesElapsed < SECOND_PHASE_MINUTES) {
-                        // Second phase: Cancel entry orders, update exit orders to 3% below market
+                        // Second phase: Convert entry orders to market orders, update exit orders to 3% below market
                         if ("entry".equals(tradeType)) {
-                            context.getLogger().log("Canceling entry order " + orderId + " after 10 minutes");
-                            if (cancelOrder(orderId, credentials)) {
-                                ordersCanceled++;
+                            // TEMPORARY CHANGE: Convert entry orders to market orders instead of canceling
+                            // This ensures we get filled on entry orders after 10 minutes instead of giving up
+                            context.getLogger().log("Converting entry order " + orderId + " to market order after 10 minutes");
+                            
+                            // ORIGINAL CODE (COMMENTED OUT - TEMPORARY CHANGE):
+                            // context.getLogger().log("Canceling entry order " + orderId + " after 10 minutes");
+                            // if (cancelOrder(orderId, credentials)) {
+                            //     ordersCanceled++;
+                            // }
+                            
+                            // NEW CODE: Convert to market order for immediate execution
+                            if (cancelAndResubmitAsMarketOrder(order, credentials)) {
+                                ordersConverted++;
+                                entryOrdersConverted++; // Track entry order conversions separately
+                                TradingCommonUtils.logTradeSuccess(symbol, "entry_market_order_converted", context);
+                                context.getLogger().log("Successfully converted entry order " + orderId + " to market order");
+                            } else {
+                                TradingCommonUtils.logTradeFailure(symbol, "entry_market_order_conversion_failed", context);
                             }
                         } else if ("exit".equals(tradeType)) {
                             double currentSpreadPrice = calculateCurrentSpreadPrice(order, credentials);
@@ -174,6 +190,7 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
                 "orders_updated", ordersUpdated,
                 "orders_canceled", ordersCanceled,
                 "orders_converted", ordersConverted,
+                "entry_orders_converted", entryOrdersConverted, // Track entry order conversions
                 "orders_monitored", openOrders.size()
             ));
             

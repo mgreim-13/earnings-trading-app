@@ -147,9 +147,10 @@ Resources:
           MONITOR_TRADES_LAMBDA: !Ref MonitorTradesLambda
           INITIATE_EXIT_TRADES_LAMBDA: !Ref InitiateExitTradesLambda
           FINNHUB_SECRET_NAME: !Ref FinnhubSecretName
+          ENVIRONMENT: !Ref Environment
           ALPACA_SECRET_NAME: !Ref AlpacaSecretName
-          EARNINGS_TABLE: !Sub '${Environment}-earnings-data'
-          FILTERED_STOCKS_TABLE: !Sub '${Environment}-filtered-stocks'
+          EARNINGS_TABLE: !Sub '${Environment}-earnings-table'
+          FILTERED_TABLE: !Sub '${Environment}-filtered-tickers-table'
       VpcConfig:
         !If
           - HasVpcConfig
@@ -174,10 +175,11 @@ Resources:
       MemorySize: 512
       Environment:
         Variables:
-          DYNAMODB_TABLE: !Sub '${Environment}-earnings-data'
+          DYNAMODB_TABLE: !Sub '${Environment}-earnings-table'
           FINNHUB_SECRET_NAME: !Ref FinnhubSecretName
           ALPACA_SECRET_NAME: !Ref AlpacaSecretName
           FINNHUB_API_URL: 'https://finnhub.io/api/v1/calendar/earnings'
+          ENVIRONMENT: !Ref Environment
 
   StockFilterLambda:
     Type: AWS::Lambda::Function
@@ -193,8 +195,11 @@ Resources:
       MemorySize: 512
       Environment:
         Variables:
-          DYNAMODB_TABLE: !Sub '${Environment}-filtered-stocks'
+          EARNINGS_TABLE: !Sub '${Environment}-earnings-table'
+          FILTERED_TABLE: !Sub '${Environment}-filtered-tickers-table'
           ALPACA_SECRET_NAME: !Ref AlpacaSecretName
+          FINNHUB_SECRET_NAME: !Ref FinnhubSecretName
+          ENVIRONMENT: !Ref Environment
 
   InitiateTradesLambda:
     Type: AWS::Lambda::Function
@@ -212,6 +217,7 @@ Resources:
         Variables:
           ALPACA_SECRET_NAME: !Ref AlpacaSecretName
           PAPER_TRADING: 'true'
+          FILTERED_TABLE: !Sub '${Environment}-filtered-tickers-table'
 
   MonitorTradesLambda:
     Type: AWS::Lambda::Function
@@ -228,6 +234,7 @@ Resources:
       Environment:
         Variables:
           ALPACA_SECRET_NAME: !Ref AlpacaSecretName
+          ENVIRONMENT: !Ref Environment
 
   InitiateExitTradesLambda:
     Type: AWS::Lambda::Function
@@ -252,7 +259,7 @@ Resources:
     Properties:
       Name: !Sub '${Environment}-market-scheduler-rule'
       Description: 'Triggers MarketSchedulerLambda at 6 AM EST on weekdays to configure daily scheduling'
-      ScheduleExpression: 'cron(0 6 ? * MON-FRI *)'  # 6 AM EST = 11 AM UTC
+      ScheduleExpression: 'cron(0 6 ? * MON-FRI *)'  # 6:00 AM EST
       State: ENABLED
       Targets:
         - Arn: !GetAtt MarketSchedulerLambda.Arn
@@ -266,7 +273,7 @@ Resources:
     Properties:
       Name: !Sub '${Environment}-table-creation-normal-rule'
       Description: 'Creates DynamoDB tables 5 minutes before normal day ScanEarningsLambda runs'
-      ScheduleExpression: 'cron(25 20 ? * MON-FRI *)'  # 3:25 PM EST = 8:25 PM UTC
+      ScheduleExpression: 'cron(25 15 ? * MON-FRI *)'  # 3:25 PM EST
       State: ENABLED
       Targets:
         - Arn: !GetAtt MarketSchedulerLambda.Arn
@@ -279,7 +286,7 @@ Resources:
     Properties:
       Name: !Sub '${Environment}-table-creation-early-rule'
       Description: 'Creates DynamoDB tables 5 minutes before early closure ScanEarningsLambda runs'
-      ScheduleExpression: 'cron(25 17 ? * MON-FRI *)'  # 12:25 PM EST = 5:25 PM UTC
+      ScheduleExpression: 'cron(25 12 ? * MON-FRI *)'  # 12:25 PM EST
       State: ENABLED
       Targets:
         - Arn: !GetAtt MarketSchedulerLambda.Arn
@@ -292,7 +299,7 @@ Resources:
     Properties:
       Name: !Sub '${Environment}-normal-scan-earnings-rule'
       Description: 'Triggers ScanEarningsLambda at 3:30 PM EST on normal trading days'
-      ScheduleExpression: 'cron(30 15 ? * MON-FRI *)'  # 3:30 PM EST = 8:30 PM UTC
+      ScheduleExpression: 'cron(30 15 ? * MON-FRI *)'  # 3:30 PM EST
       State: ENABLED
       Targets:
         - Arn: !GetAtt ScanEarningsLambda.Arn
@@ -304,7 +311,7 @@ Resources:
     Properties:
       Name: !Sub '${Environment}-normal-stock-filter-rule'
       Description: 'Triggers StockFilterLambda at 3:35 PM EST on normal trading days'
-      ScheduleExpression: 'cron(35 15 ? * MON-FRI *)'  # 3:35 PM EST = 8:35 PM UTC
+      ScheduleExpression: 'cron(35 15 ? * MON-FRI *)'  # 3:35 PM EST
       State: ENABLED
       Targets:
         - Arn: !GetAtt StockFilterLambda.Arn
@@ -316,7 +323,7 @@ Resources:
     Properties:
       Name: !Sub '${Environment}-normal-initiate-trades-rule'
       Description: 'Triggers InitiateTradesLambda at 3:45 PM EST on normal trading days'
-      ScheduleExpression: 'cron(45 15 ? * MON-FRI *)'  # 3:45 PM EST = 8:45 PM UTC
+      ScheduleExpression: 'cron(45 15 ? * MON-FRI *)'  # 3:45 PM EST
       State: ENABLED
       Targets:
         - Arn: !GetAtt InitiateTradesLambda.Arn
@@ -328,7 +335,7 @@ Resources:
     Properties:
       Name: !Sub '${Environment}-normal-initiate-exit-trades-rule'
       Description: 'Triggers InitiateExitTradesLambda at 9:45 AM EST on normal trading days'
-      ScheduleExpression: 'cron(45 9 ? * MON-FRI *)'  # 9:45 AM EST = 2:45 PM UTC
+      ScheduleExpression: 'cron(45 9 ? * MON-FRI *)'  # 9:45 AM EST
       State: ENABLED
       Targets:
         - Arn: !GetAtt InitiateExitTradesLambda.Arn
@@ -342,7 +349,7 @@ Resources:
     Properties:
       Name: !Sub '${Environment}-normal-monitor-trades-rule-1'
       Description: 'Triggers MonitorTradesLambda every 30 seconds during 9:45:30-10:00 AM EST on normal trading days'
-      ScheduleExpression: 'cron(*/30 14-15 ? * MON-FRI *)'  # Every 30 seconds from 2:45-3:00 PM UTC (9:45-10:00 AM EST)
+      ScheduleExpression: 'cron(*/30 9 ? * MON-FRI *)'  # Every 30 seconds from 9:45-10:00 AM EST
       State: ENABLED
       Targets:
         - Arn: !GetAtt MonitorTradesLambda.Arn
@@ -355,7 +362,7 @@ Resources:
     Properties:
       Name: !Sub '${Environment}-normal-monitor-trades-rule-2'
       Description: 'Triggers MonitorTradesLambda every 30 seconds during 3:45:30-4:00 PM EST on normal trading days'
-      ScheduleExpression: 'cron(*/30 20-21 ? * MON-FRI *)'  # Every 30 seconds from 8:45-9:00 PM UTC (3:45-4:00 PM EST)
+      ScheduleExpression: 'cron(*/30 15 ? * MON-FRI *)'  # Every 30 seconds from 3:45-4:00 PM EST
       State: ENABLED
       Targets:
         - Arn: !GetAtt MonitorTradesLambda.Arn
@@ -369,7 +376,7 @@ Resources:
     Properties:
       Name: !Sub '${Environment}-early-scan-earnings-rule'
       Description: 'Triggers ScanEarningsLambda at 12:30 PM EST on early closure days'
-      ScheduleExpression: 'cron(30 12 ? * MON-FRI *)'  # 12:30 PM EST = 5:30 PM UTC
+      ScheduleExpression: 'cron(30 12 ? * MON-FRI *)'  # 12:30 PM EST
       State: DISABLED  # Will be enabled dynamically
       Targets:
         - Arn: !GetAtt ScanEarningsLambda.Arn
@@ -381,7 +388,7 @@ Resources:
     Properties:
       Name: !Sub '${Environment}-early-stock-filter-rule'
       Description: 'Triggers StockFilterLambda at 12:35 PM EST on early closure days'
-      ScheduleExpression: 'cron(35 12 ? * MON-FRI *)'  # 12:35 PM EST = 5:35 PM UTC
+      ScheduleExpression: 'cron(35 12 ? * MON-FRI *)'  # 12:35 PM EST
       State: DISABLED  # Will be enabled dynamically
       Targets:
         - Arn: !GetAtt StockFilterLambda.Arn
@@ -393,7 +400,7 @@ Resources:
     Properties:
       Name: !Sub '${Environment}-early-initiate-trades-rule'
       Description: 'Triggers InitiateTradesLambda at 12:45 PM EST on early closure days'
-      ScheduleExpression: 'cron(45 12 ? * MON-FRI *)'  # 12:45 PM EST = 5:45 PM UTC
+      ScheduleExpression: 'cron(45 12 ? * MON-FRI *)'  # 12:45 PM EST
       State: DISABLED  # Will be enabled dynamically
       Targets:
         - Arn: !GetAtt InitiateTradesLambda.Arn
@@ -405,7 +412,7 @@ Resources:
     Properties:
       Name: !Sub '${Environment}-early-initiate-exit-trades-rule'
       Description: 'Triggers InitiateExitTradesLambda at 9:45 AM EST on early closure days'
-      ScheduleExpression: 'cron(45 9 ? * MON-FRI *)'  # 9:45 AM EST = 2:45 PM UTC
+      ScheduleExpression: 'cron(45 9 ? * MON-FRI *)'  # 9:45 AM EST
       State: DISABLED  # Will be enabled dynamically
       Targets:
         - Arn: !GetAtt InitiateExitTradesLambda.Arn
@@ -419,7 +426,7 @@ Resources:
     Properties:
       Name: !Sub '${Environment}-early-monitor-trades-rule-1'
       Description: 'Triggers MonitorTradesLambda every 30 seconds during 9:45:30-10:00 AM EST on early closure days'
-      ScheduleExpression: 'cron(*/30 14-15 ? * MON-FRI *)'  # Every 30 seconds from 2:45-3:00 PM UTC (9:45-10:00 AM EST)
+      ScheduleExpression: 'cron(*/30 9 ? * MON-FRI *)'  # Every 30 seconds from 9:45-10:00 AM EST
       State: DISABLED  # Will be enabled dynamically
       Targets:
         - Arn: !GetAtt MonitorTradesLambda.Arn
@@ -432,7 +439,7 @@ Resources:
     Properties:
       Name: !Sub '${Environment}-early-monitor-trades-rule-2'
       Description: 'Triggers MonitorTradesLambda every 30 seconds during 12:45:30-1:00 PM EST on early closure days'
-      ScheduleExpression: 'cron(*/30 17-18 ? * MON-FRI *)'  # Every 30 seconds from 5:45-6:00 PM UTC (12:45-1:00 PM EST)
+      ScheduleExpression: 'cron(*/30 12 ? * MON-FRI *)'  # Every 30 seconds from 12:45-1:00 PM EST
       State: DISABLED  # Will be enabled dynamically
       Targets:
         - Arn: !GetAtt MonitorTradesLambda.Arn
@@ -446,7 +453,7 @@ Resources:
     Properties:
       Name: !Sub '${Environment}-table-cleanup-early-rule'
       Description: 'Cleans up DynamoDB tables 30 minutes after early closure ScanEarningsLambda'
-      ScheduleExpression: 'cron(0 18 ? * MON-FRI *)'  # 1:00 PM EST
+      ScheduleExpression: 'cron(0 13 ? * MON-FRI *)'  # 1:00 PM EST
       State: ENABLED
       Targets:
         - Arn: !GetAtt MarketSchedulerLambda.Arn
@@ -459,7 +466,7 @@ Resources:
     Properties:
       Name: !Sub '${Environment}-table-cleanup-normal-rule'
       Description: 'Cleans up DynamoDB tables 30 minutes after normal day ScanEarningsLambda'
-      ScheduleExpression: 'cron(0 21 ? * MON-FRI *)'  # 4:00 PM EST
+      ScheduleExpression: 'cron(0 16 ? * MON-FRI *)'  # 4:00 PM EST
       State: ENABLED
       Targets:
         - Arn: !GetAtt MarketSchedulerLambda.Arn

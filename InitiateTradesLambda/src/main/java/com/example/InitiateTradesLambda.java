@@ -19,7 +19,7 @@ import java.util.*;
  */
 public class InitiateTradesLambda implements RequestHandler<Map<String, Object>, String> {
 
-    private static final String FILTERED_TABLE = System.getenv().getOrDefault("FILTERED_TABLE", "FilteredTickersTable");
+    private static final String FILTERED_TABLE = System.getenv().getOrDefault("FILTERED_TABLE", "dev-filtered-tickers-table");
     private static final String ALPACA_SECRET_NAME = System.getenv().getOrDefault("ALPACA_SECRET_NAME", "alpaca-api-keys");
     private static final String ALPACA_API_URL = System.getenv().getOrDefault("ALPACA_API_URL", "https://paper-api.alpaca.markets/v2");
     private static final String ALPACA_DATA_URL = "https://data.alpaca.markets/v1beta1";

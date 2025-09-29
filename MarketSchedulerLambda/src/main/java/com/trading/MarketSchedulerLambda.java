@@ -3,14 +3,8 @@ package com.trading;
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.trading.common.TradingCommonUtils;
 import com.trading.common.models.AlpacaCredentials;
-import software.amazon.awssdk.services.lambda.LambdaClient;
-import software.amazon.awssdk.services.lambda.model.InvocationType;
-import software.amazon.awssdk.services.lambda.model.InvokeRequest;
-import software.amazon.awssdk.services.lambda.model.InvokeResponse;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
 import software.amazon.awssdk.services.eventbridge.model.EnableRuleRequest;
@@ -25,7 +19,6 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.HashMap;
 import java.util.Map;
 
 /**
@@ -34,17 +27,9 @@ import java.util.Map;
 public class MarketSchedulerLambda implements RequestHandler<Map<String, Object>, String> {
     
     private static final ZoneId EST_ZONE = ZoneId.of("America/New_York");
-    private static final ObjectMapper objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
-    private static final LambdaClient lambdaClient = LambdaClient.builder().build();
     private static final DynamoDbClient dynamoDbClient = DynamoDbClient.builder().build();
     private static final EventBridgeClient eventBridgeClient = EventBridgeClient.builder().build();
     
-    // Lambda function names (will be passed as environment variables)
-    private static final String SCAN_EARNINGS_LAMBDA = System.getenv("SCAN_EARNINGS_LAMBDA");
-    private static final String STOCK_FILTER_LAMBDA = System.getenv("STOCK_FILTER_LAMBDA");
-    private static final String INITIATE_TRADES_LAMBDA = System.getenv("INITIATE_TRADES_LAMBDA");
-    private static final String MONITOR_TRADES_LAMBDA = System.getenv("MONITOR_TRADES_LAMBDA");
-    private static final String INITIATE_EXIT_TRADES_LAMBDA = System.getenv("INITIATE_EXIT_TRADES_LAMBDA");
     
     // Finnhub API configuration
     private static final String FINNHUB_SECRET_NAME = System.getenv("FINNHUB_SECRET_NAME");
@@ -52,7 +37,7 @@ public class MarketSchedulerLambda implements RequestHandler<Map<String, Object>
     
     // DynamoDB table names
     private static final String EARNINGS_TABLE = System.getenv("EARNINGS_TABLE");
-    private static final String FILTERED_STOCKS_TABLE = System.getenv("FILTERED_STOCKS_TABLE");
+    private static final String FILTERED_STOCKS_TABLE = System.getenv("FILTERED_TABLE");
     
     @Override
     public String handleRequest(Map<String, Object> event, Context context) {
@@ -340,34 +325,6 @@ public class MarketSchedulerLambda implements RequestHandler<Map<String, Object>
     }
     
     
-    private void invokeLambda(String functionName, String description, Context context) {
-        if (functionName == null || functionName.isEmpty()) {
-            context.getLogger().log("Function name not configured for " + description);
-            return;
-        }
-        
-        try {
-            Map<String, Object> payload = new HashMap<>();
-            payload.put("source", "market-scheduler");
-            payload.put("timestamp", LocalDateTime.now(EST_ZONE).toString());
-            
-            String payloadJson = objectMapper.writeValueAsString(payload);
-            
-            InvokeRequest request = InvokeRequest.builder()
-                .functionName(functionName)
-                .invocationType(InvocationType.EVENT)
-                .payload(software.amazon.awssdk.core.SdkBytes.fromUtf8String(payloadJson))
-                .build();
-            
-            InvokeResponse response = lambdaClient.invoke(request);
-            
-            context.getLogger().log(String.format("Successfully triggered %s (status: %d)", 
-                description, response.statusCode()));
-            
-        } catch (Exception e) {
-            context.getLogger().log("Error invoking " + description + ": " + e.getMessage());
-        }
-    }
     
     /**
      * Handle table creation event (triggered 5 minutes before ScanEarningsLambda)
@@ -482,7 +439,7 @@ public class MarketSchedulerLambda implements RequestHandler<Map<String, Object>
                         .build()
                 )
                 .tags(
-                    software.amazon.awssdk.services.dynamodb.model.Tag.builder().key("Environment").value(System.getenv("ENVIRONMENT")).build(),
+                    software.amazon.awssdk.services.dynamodb.model.Tag.builder().key("Environment").value(System.getenv().getOrDefault("ENVIRONMENT", "dev")).build(),
                     software.amazon.awssdk.services.dynamodb.model.Tag.builder().key("Purpose").value("Trading data with 30-minute TTL").build()
                 )
                 .build();
