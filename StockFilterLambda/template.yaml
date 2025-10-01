@@ -11,14 +11,23 @@ Globals:
       Variables:
         EARNINGS_TABLE: !Ref EarningsTable
         FILTERED_TABLE: !Ref FilteredTickersTable
-        VOLUME_THRESHOLD: '1000000'
-        RATIO_THRESHOLD: '1.2'
-        SLOPE_THRESHOLD: '-0.00406'
+        VOLUME_THRESHOLD: '2000000'
+        IV_RATIO_THRESHOLD: '1.25'
+        ATM_THRESHOLD: '0.05'
+        SLOPE_THRESHOLD: '0.025'
         MIN_AVERAGE_VOLUME: '500000'
-        VOLATILITY_CRUSH_THRESHOLD: '0.85'
-        EARNINGS_STABILITY_THRESHOLD: '0.05'
+        VOLATILITY_CRUSH_THRESHOLD: '0.80'
+        CRUSH_PERCENTAGE: '0.60'
+        EARNINGS_STABILITY_THRESHOLD: '0.06'
+        STABILITY_THRESHOLD: '0.55'
+        STRADDLE_HISTORICAL_MULTIPLIER: '1.5'
+        MAX_DEBIT_TO_PRICE_RATIO: '0.05'
+        BID_ASK_THRESHOLD: '0.08'
+        QUOTE_DEPTH_THRESHOLD: '100'
+        MIN_DAILY_OPTION_TRADES: '500'
         MIN_STOCK_PRICE: '20.0'
         MAX_STOCK_PRICE: '1000.0'
+        MIN_SCORE_THRESHOLD: '7'
 
 Parameters:
   Environment:
@@ -43,9 +52,23 @@ Resources:
         Variables:
           EARNINGS_TABLE: !Ref EarningsTable
           FILTERED_TABLE: !Ref FilteredTickersTable
-          VOLUME_THRESHOLD: !Ref VolumeThreshold
-          RATIO_THRESHOLD: !Ref RatioThreshold
-          SLOPE_THRESHOLD: !Ref SlopeThreshold
+          VOLUME_THRESHOLD: '2000000'
+          IV_RATIO_THRESHOLD: '1.25'
+          ATM_THRESHOLD: '0.05'
+          SLOPE_THRESHOLD: '0.025'
+          MIN_AVERAGE_VOLUME: '500000'
+          VOLATILITY_CRUSH_THRESHOLD: '0.80'
+          CRUSH_PERCENTAGE: '0.60'
+          EARNINGS_STABILITY_THRESHOLD: '0.06'
+          STABILITY_THRESHOLD: '0.55'
+          STRADDLE_HISTORICAL_MULTIPLIER: '1.5'
+          MAX_DEBIT_TO_PRICE_RATIO: '0.05'
+          BID_ASK_THRESHOLD: '0.08'
+          QUOTE_DEPTH_THRESHOLD: '100'
+          MIN_DAILY_OPTION_TRADES: '500'
+          MIN_STOCK_PRICE: '20.0'
+          MAX_STOCK_PRICE: '1000.0'
+          MIN_SCORE_THRESHOLD: '7'
       Policies:
         - DynamoDBReadPolicy:
             TableName: !Ref EarningsTable
@@ -141,22 +164,6 @@ Resources:
                 Resource: !GetAtt StockFilterLambdaFunction.Arn
 
 Parameters:
-  VolumeThreshold:
-    Type: Number
-    Default: 1000000
-    Description: Minimum average daily volume threshold
-    MinValue: 0
-
-  RatioThreshold:
-    Type: Number
-    Default: 1.2
-    Description: Minimum IV30/RV30 ratio threshold
-    MinValue: 0
-
-  SlopeThreshold:
-    Type: Number
-    Default: 0.0
-    Description: Minimum term structure slope threshold
 
 Outputs:
   StockFilterLambdaFunctionArn:

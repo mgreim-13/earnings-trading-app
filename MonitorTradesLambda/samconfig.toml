@@ -11,7 +11,7 @@ s3_prefix = "monitor-trades-lambda"
 region = "us-east-1"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
-parameter_overrides = "AlpacaSecretName=alpaca-api-keys"
+parameter_overrides = "AlpacaSecretName=trading/alpaca/credentials"
 image_repositories = []
 
 [default.build.parameters]

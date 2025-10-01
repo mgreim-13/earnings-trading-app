@@ -40,7 +40,7 @@ MonitorTradesLambda/
 ## Dependencies
 
 - AWS SDK for Java v2 (DynamoDB, Secrets Manager)
-- Apache HttpClient for HTTP requests
+- OkHttp3 for HTTP requests (via AlpacaHttpClient)
 - Jackson for JSON processing
 - JUnit 5 for testing
 - Mockito for mocking
@@ -161,7 +161,7 @@ sam deploy --guided
 3. **Update Alpaca credentials**:
 ```bash
 aws secretsmanager update-secret \
-  --secret-id alpaca-api-keys \
+  --secret-id trading/alpaca/credentials \
   --secret-string '{"apiKey":"your-key","secretKey":"your-secret"}'
 ```
 

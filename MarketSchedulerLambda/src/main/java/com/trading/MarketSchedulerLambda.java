@@ -4,6 +4,9 @@ import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.trading.common.TradingCommonUtils;
+import com.trading.common.JsonUtils;
+import com.trading.common.TradingErrorHandler;
+import com.trading.common.AlpacaHttpClient;
 import com.trading.common.models.AlpacaCredentials;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
@@ -15,6 +18,7 @@ import software.amazon.awssdk.services.dynamodb.model.KeySchemaElement;
 import software.amazon.awssdk.services.dynamodb.model.KeyType;
 import software.amazon.awssdk.services.dynamodb.model.ScalarAttributeType;
 
+import java.io.IOException;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -32,7 +36,7 @@ public class MarketSchedulerLambda implements RequestHandler<Map<String, Object>
     
     
     // Finnhub API configuration
-    private static final String FINNHUB_SECRET_NAME = System.getenv("FINNHUB_SECRET_NAME");
+    private static final String FINNHUB_SECRET_NAME = System.getenv().getOrDefault("FINNHUB_SECRET_NAME", "trading/finnhub/credentials");
     private static final String FINNHUB_API_URL = "https://finnhub.io/api/v1";
     
     // DynamoDB table names
@@ -51,7 +55,7 @@ public class MarketSchedulerLambda implements RequestHandler<Map<String, Object>
             // Only run on weekdays (Monday-Friday)
             if (today.getDayOfWeek().getValue() > 5) {
                 context.getLogger().log(String.format("Skipping execution - %s is a weekend", today));
-                return TradingCommonUtils.createSuccessResponse("Skipped - weekend day", null);
+                return TradingErrorHandler.createSuccessResponse("Skipped - weekend day", null);
             }
             
             // When running at 1 AM EST, we're checking the market status for the current day
@@ -81,15 +85,15 @@ public class MarketSchedulerLambda implements RequestHandler<Map<String, Object>
                     break;
                 default:
                     context.getLogger().log("Unknown event source: " + eventSource);
-                    return TradingCommonUtils.createErrorResponse("Unknown event source", 400);
+                    return TradingErrorHandler.createErrorResponse("Unknown event source", 400);
             }
             
-            return TradingCommonUtils.createSuccessResponse("Market scheduler completed successfully", null);
+            return TradingErrorHandler.createSuccessResponse("Market scheduler completed successfully", null);
             
         } catch (Exception e) {
             context.getLogger().log("Error in Market Scheduler: " + e.getMessage());
             e.printStackTrace();
-            return TradingCommonUtils.createErrorResponse("Market scheduler failed: " + e.getMessage(), 500);
+            return TradingErrorHandler.createErrorResponse("Market scheduler failed: " + e.getMessage(), 500);
         }
     }
     
@@ -124,15 +128,15 @@ public class MarketSchedulerLambda implements RequestHandler<Map<String, Object>
             // Get Finnhub API key
             String apiKey = getFinnhubApiKey();
             if (apiKey == null) {
-                context.getLogger().log("Finnhub API key not found, assuming no holiday");
-                return false;
+                context.getLogger().log("Finnhub API key not found, using hardcoded holiday list");
+                return isHardcodedHoliday(date);
             }
             
-            // Call Finnhub calendar API
-            String url = FINNHUB_API_URL + "/calendar/earnings?from=" + date + "&to=" + date;
-            String response = TradingCommonUtils.makeHttpRequest(url, apiKey, "", "GET", null);
+            // Call Finnhub calendar API with proper authentication
+            String url = FINNHUB_API_URL + "/calendar/earnings?from=" + date + "&to=" + date + "&token=" + apiKey;
+            String response = makeFinnhubRequest(url, apiKey);
             
-            JsonNode responseNode = TradingCommonUtils.parseJson(response);
+            JsonNode responseNode = JsonUtils.parseJson(response);
             
             // Check if there are any earnings events (simplified holiday check)
             // In a real implementation, you'd use a dedicated holiday API
@@ -140,8 +144,25 @@ public class MarketSchedulerLambda implements RequestHandler<Map<String, Object>
             
         } catch (Exception e) {
             context.getLogger().log("Error checking holiday status: " + e.getMessage());
-            return false; // Assume not a holiday on error
+            // Fall back to hardcoded holiday list
+            return isHardcodedHoliday(date);
         }
+    }
+    
+    private boolean isHardcodedHoliday(LocalDate date) {
+        // Common US market holidays for 2025
+        String monthDay = date.format(DateTimeFormatter.ofPattern("MM-dd"));
+        
+        return monthDay.equals("01-01") || // New Year's Day
+               monthDay.equals("01-20") || // Martin Luther King Jr. Day
+               monthDay.equals("02-17") || // Presidents' Day
+               monthDay.equals("04-18") || // Good Friday
+               monthDay.equals("05-26") || // Memorial Day
+               monthDay.equals("06-19") || // Juneteenth
+               monthDay.equals("07-04") || // Independence Day
+               monthDay.equals("09-01") || // Labor Day
+               monthDay.equals("11-27") || // Thanksgiving Day
+               monthDay.equals("12-25");  // Christmas Day
     }
     
     private boolean isEarlyClosureDay(LocalDate date, Context context) {
@@ -159,8 +180,8 @@ public class MarketSchedulerLambda implements RequestHandler<Map<String, Object>
         try {
             // Get Finnhub API key from Secrets Manager
             // The secret should contain the API key directly in the "apiKey" field
-            AlpacaCredentials credentials = TradingCommonUtils.getAlpacaCredentials(FINNHUB_SECRET_NAME);
-            return credentials.getApiKey();
+            Map<String, String> credentials = TradingCommonUtils.getAlpacaCredentialsAsMap(FINNHUB_SECRET_NAME);
+            return credentials.get("apiKey");
         } catch (Exception e) {
             return null;
         }
@@ -492,6 +513,20 @@ public class MarketSchedulerLambda implements RequestHandler<Map<String, Object>
         } catch (Exception e) {
             context.getLogger().log("Error deleting table " + tableName + ": " + e.getMessage());
             // Don't throw - continue with cleanup
+        }
+    }
+
+    /**
+     * Makes HTTP request to Finnhub API
+     */
+    private String makeFinnhubRequest(String url, String apiKey) throws IOException {
+        try {
+            AlpacaCredentials credentials = new AlpacaCredentials();
+            credentials.setApiKey(apiKey);
+            credentials.setSecretKey(""); // Finnhub doesn't use secret key
+            return AlpacaHttpClient.makeAlpacaRequest(url, "GET", null, credentials);
+        } catch (Exception e) {
+            throw new IOException("Finnhub API request failed: " + e.getMessage(), e);
         }
     }
 

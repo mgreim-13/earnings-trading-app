@@ -1,11 +1,12 @@
 package com.example;
 
 import com.amazonaws.services.lambda.runtime.Context;
-import com.example.AlpacaApiService.OptionSnapshot;
+import com.trading.common.models.OptionSnapshot;
+import com.trading.common.models.AlpacaCredentials;
 
 import java.time.LocalDate;
-import java.util.List;
-import java.util.Map;
+import java.time.ZoneId;
+import java.util.*;
 
 /**
  * Filter for checking term structure backwardation
@@ -13,61 +14,43 @@ import java.util.Map;
  */
 public class TermStructureFilter {
     
-    private final AlpacaApiService alpacaApiService;
+    private final AlpacaCredentials credentials;
     private final StockFilterCommonUtils commonUtils;
     
     // Thresholds
     private final double SLOPE_THRESHOLD;
-    private final double HV_SLOPE_THRESHOLD;
     
-    public TermStructureFilter(AlpacaApiService alpacaApiService, StockFilterCommonUtils commonUtils) {
-        this.alpacaApiService = alpacaApiService;
+    public TermStructureFilter(AlpacaCredentials credentials, StockFilterCommonUtils commonUtils) {
+        this.credentials = credentials;
         this.commonUtils = commonUtils;
         
         // Load thresholds from environment
         this.SLOPE_THRESHOLD = Double.parseDouble(System.getenv().getOrDefault("SLOPE_THRESHOLD", "0.01"));
-        this.HV_SLOPE_THRESHOLD = Double.parseDouble(System.getenv().getOrDefault("HV_SLOPE_THRESHOLD", "-0.00406"));
     }
     
     /**
-     * Check if stock has term structure backwardation
+     * Check if stock has term structure backwardation using options data only
+     * Uses reusable option selection logic to find closest strikes and expirations
      */
     public boolean hasTermStructureBackwardation(String ticker, LocalDate earningsDate, Context context) {
         try {
             double currentPrice = commonUtils.getCurrentStockPrice(ticker, context);
             if (currentPrice <= 0) return false;
             
-            double ivEarningsWeek = getIVForShortLeg(ticker, earningsDate, currentPrice, context);
-            double iv30 = getIVForLongLeg(ticker, earningsDate, currentPrice, context);
-            double iv60 = getIVForExpiration(ticker, earningsDate.plusDays(60), currentPrice, context);
-            
-            // If options data is available, use it
-            if (ivEarningsWeek > 0 && iv30 > 0 && iv60 > 0) {
-                double maxLongTermIV = Math.max(iv30, iv60);
-                double difference = ivEarningsWeek - maxLongTermIV;
-                boolean passes = difference >= SLOPE_THRESHOLD;
-                
-                context.getLogger().log(ticker + " term structure (options): IV_earnings=" + ivEarningsWeek + 
-                    ", max(IV30,IV60)=" + maxLongTermIV + ", diff=" + String.format("%.3f", difference) + " (" + passes + ")");
-                
-                return passes;
-            }
-            
-            // Fallback to HV-based slope (vol60 - vol30)
-            context.getLogger().log("No options IV data for " + ticker + ", using HV fallback for term structure");
-            StockData stockData = getRealStockData(ticker, context);
-            if (stockData == null) {
-                context.getLogger().log("No stock data available for HV fallback for " + ticker);
+            // Get options data for term structure analysis
+            TermStructureData termData = getTermStructureData(ticker, earningsDate, currentPrice, context);
+            if (termData == null) {
+                context.getLogger().log("No options data available for term structure analysis for " + ticker);
                 return false;
             }
             
-            double termSlope = stockData.getTermStructureSlope();
-            boolean passes = termSlope <= HV_SLOPE_THRESHOLD;
+            // Calculate term structure backwardation
+            TermStructureResult result = calculateTermStructureBackwardation(termData);
             
-            context.getLogger().log(ticker + " term structure (HV fallback): slope=" + 
-                String.format("%.6f", termSlope) + " <= " + HV_SLOPE_THRESHOLD + " (" + passes + ")");
+            // Log the results
+            logTermStructureResults(ticker, termData, result, context);
             
-            return passes;
+            return result.isPasses();
             
         } catch (Exception e) {
             context.getLogger().log("Error checking term structure for " + ticker + ": " + e.getMessage());
@@ -76,135 +59,251 @@ public class TermStructureFilter {
     }
     
     /**
-     * Get IV for short leg (earnings + 1 day)
+     * Get comprehensive term structure data using reusable option selection logic
+     * Uses scan date as base date - all filters find the same options
+     * - Short leg: Earliest expiration after scan date (consistent across all filters)
+     * - Medium leg: Closest to 30 days from scan date (monthly options)
+     * - Long leg: Closest to 60 days from scan date (quarterly options)
+     * Since scan runs day before earnings, next trading day after earnings = next trading day after scan
      */
-    private double getIVForShortLeg(String ticker, LocalDate earningsDate, double currentPrice, Context context) {
-        return getIVForLeg(ticker, earningsDate, 1, currentPrice, context);
-    }
-    
-    /**
-     * Get IV for long leg (~30 days post-earnings)
-     */
-    private double getIVForLongLeg(String ticker, LocalDate earningsDate, double currentPrice, Context context) {
-        return getIVForLeg(ticker, earningsDate, 30, currentPrice, context);
-    }
-    
-    /**
-     * Get IV for specific leg based on earnings date and offset
-     */
-    private double getIVForLeg(String ticker, LocalDate earningsDate, int daysOffset, double currentPrice, Context context) {
+    private TermStructureData getTermStructureData(String ticker, LocalDate earningsDate, double currentPrice, Context context) {
         try {
-            LocalDate expiration = earningsDate.plusDays(daysOffset);
-            return getIVForExpiration(ticker, expiration, currentPrice, context);
-        } catch (Exception e) {
-            context.getLogger().log("Error getting IV for leg (+" + daysOffset + " days): " + e.getMessage());
-            return 0.0;
-        }
-    }
-    
-    /**
-     * Get IV for specific expiration date
-     */
-    private double getIVForExpiration(String ticker, LocalDate expiration, double currentPrice, Context context) {
-        try {
-            // Get options chain for the expiration date
-            LocalDate startDate = expiration.minusDays(2);
-            LocalDate endDate = expiration.plusDays(2);
+            LocalDate scanDate = LocalDate.now(ZoneId.of("America/New_York")); // Scan date = day before earnings
             
-            Map<String, OptionSnapshot> optionChain = alpacaApiService.getOptionChain(
-                ticker, startDate, endDate, "call");
+            // Get wide range of options (1-60 days) to find proper legs
+            Map<String, OptionSnapshot> allOptions = getOptionChainForLeg(ticker, scanDate, 1, 60, context);
             
-            if (optionChain.isEmpty()) {
-                context.getLogger().log("No options chain available for " + ticker + " at " + expiration);
-                return 0.0;
-            }
-            
-            // Find ATM call option
-            OptionSnapshot atmOption = commonUtils.findATMOption(optionChain, currentPrice);
-            if (atmOption == null) {
-                context.getLogger().log("No ATM option found for " + ticker + " at " + expiration);
-                return 0.0;
-            }
-            
-            double impliedVol = atmOption.getImpliedVol();
-            if (impliedVol <= 0) {
-                context.getLogger().log("Invalid implied volatility for " + ticker + " at " + expiration);
-                return 0.0;
-            }
-            
-            context.getLogger().log("Found IV for " + ticker + " at " + expiration + ": " + impliedVol);
-            return impliedVol;
-            
-        } catch (Exception e) {
-            context.getLogger().log("Error getting IV for expiration " + expiration + " for " + ticker + ": " + e.getMessage());
-            return 0.0;
-        }
-    }
-    
-    /**
-     * Get real stock data with simplified calculations
-     */
-    private StockData getRealStockData(String ticker, Context context) {
-        try {
-            // Get latest trade for current price and volume
-            AlpacaApiService.LatestTrade latestTrade = alpacaApiService.getLatestTrade(ticker);
-            if (latestTrade == null) {
-                context.getLogger().log("No trade data available for: " + ticker);
+            if (allOptions.isEmpty()) {
+                context.getLogger().log("No options data available for " + ticker);
                 return null;
             }
             
-            // Get historical data for calculations
-            List<AlpacaApiService.HistoricalBar> historicalBars = alpacaApiService.getHistoricalBars(ticker, 90);
-            if (historicalBars == null || historicalBars.isEmpty()) {
-                context.getLogger().log("No historical data available for: " + ticker);
+            // Find short leg using reusable logic - earliest expiration after scan date
+            LocalDate shortExpiration = com.trading.common.OptionSelectionUtils.findShortLegExpirationFromOptionChain(allOptions, scanDate);
+            if (shortExpiration == null) {
+                context.getLogger().log("No suitable short leg expiration found for " + ticker);
                 return null;
             }
             
-            // Sort historical bars by timestamp to ensure chronological order
-            historicalBars.sort((a, b) -> a.getTimestamp().compareTo(b.getTimestamp()));
+            // Filter to short leg options only
+            Map<String, OptionSnapshot> shortChain = allOptions.entrySet().stream()
+                .filter(entry -> entry.getKey().equals(shortExpiration.toString()))
+                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
             
-            // Calculate average volume from historical data
-            double averageVolume = commonUtils.calculateAverageVolume(historicalBars);
+            // Find medium leg using reusable logic - closest to 30 days from scan date
+            LocalDate mediumExpiration = com.trading.common.OptionSelectionUtils.findFarLegExpirationFromOptionChain(allOptions, scanDate, shortExpiration, 30);
+            if (mediumExpiration == null) {
+                context.getLogger().log("No suitable medium leg expiration found for " + ticker);
+                return null;
+            }
             
-            // Calculate RV30 (realized volatility)
-            double rv30 = commonUtils.calculateRV30(historicalBars, context);
+            // Filter to medium leg options only
+            Map<String, OptionSnapshot> mediumChain = allOptions.entrySet().stream()
+                .filter(entry -> entry.getKey().equals(mediumExpiration.toString()))
+                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
             
-            // Calculate IV30 (implied volatility - using HV as proxy)
-            double iv30 = commonUtils.calculateIV30(historicalBars, context);
+            // Find long leg using reusable logic - closest to 60 days from scan date
+            LocalDate longExpiration = com.trading.common.OptionSelectionUtils.findFarLegExpirationFromOptionChain(allOptions, scanDate, shortExpiration, 60);
+            if (longExpiration == null) {
+                context.getLogger().log("No suitable long leg expiration found for " + ticker);
+                return null;
+            }
             
-            // Calculate term structure slope
-            double termSlope = commonUtils.calculateTermStructureSlope(historicalBars, context);
+            // Filter to long leg options only
+            Map<String, OptionSnapshot> longChain = allOptions.entrySet().stream()
+                .filter(entry -> entry.getKey().equals(longExpiration.toString()))
+                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
             
-            return new StockData(ticker, averageVolume, rv30, iv30, termSlope);
+            // Check if we have at least one leg
+            if (shortChain.isEmpty() && mediumChain.isEmpty() && longChain.isEmpty()) {
+                context.getLogger().log("No options data available for any leg for " + ticker);
+                return null;
+            }
+            
+            // Find the best common strike across all available legs
+            double bestCommonStrike = findBestCommonStrike(shortChain, mediumChain, longChain, currentPrice);
+            if (bestCommonStrike < 0) {
+                context.getLogger().log("No common strikes found across option chains for " + ticker);
+                return null;
+            }
+            
+            // Extract IV for each leg using the common strike
+            double ivEarningsWeek = getIVForStrike(shortChain, bestCommonStrike, "earnings week", context);
+            double iv30 = getIVForStrike(mediumChain, bestCommonStrike, "30-day", context);
+            double iv60 = getIVForStrike(longChain, bestCommonStrike, "60-day", context);
+            
+            // Check if we have at least the earnings week and one long-term leg
+            if (ivEarningsWeek <= 0 || (iv30 <= 0 && iv60 <= 0)) {
+                context.getLogger().log("Insufficient IV data for term structure analysis for " + ticker);
+                return null;
+            }
+            
+            return new TermStructureData(ivEarningsWeek, iv30, iv60);
             
         } catch (Exception e) {
-            context.getLogger().log("Error getting real stock data for " + ticker + ": " + e.getMessage());
+            context.getLogger().log("Error getting term structure data for " + ticker + ": " + e.getMessage());
             return null;
         }
     }
     
     /**
-     * Data class for stock information
+     * Get option chain for a specific leg using reusable logic
+     * Uses realistic windows based on standard options expiration cycles:
+     * - Short leg: 1-7 days (weekly options)
+     * - Medium leg: 30-37 days (monthly options) 
+     * - Long leg: 60-75 days (quarterly options)
      */
-    private static class StockData {
-        private final String ticker;
-        private final double averageVolume;
-        private final double rv30;
-        private final double iv30;
-        private final double termStructureSlope;
+    private Map<String, OptionSnapshot> getOptionChainForLeg(String ticker, LocalDate baseDate, int minDays, int maxDays, Context context) {
+        return commonUtils.getOptionChainForDateRange(ticker, baseDate, minDays, maxDays, "call", credentials, context);
+    }
+    
+    /**
+     * Find the best common strike across multiple option chains
+     * Uses hybrid approach: try to find common strikes across all legs, fall back to best available
+     */
+    private double findBestCommonStrike(Map<String, OptionSnapshot> shortChain, 
+                                      Map<String, OptionSnapshot> mediumChain, 
+                                      Map<String, OptionSnapshot> longChain, 
+                                      double currentPrice) {
+        try {
+            // First try to find common strikes across all 3 legs
+            Set<Double> commonStrikes = findCommonStrikesAcrossAllChains(shortChain, mediumChain, longChain);
+            
+            if (!commonStrikes.isEmpty()) {
+                // Use common strikes approach (most reliable)
+                return commonUtils.findClosestStrikeToPrice(commonStrikes, currentPrice);
+            }
+            
+            // Fallback: try common strikes between short and each long leg
+            Set<Double> shortMediumCommon = findCommonStrikesBetweenChains(shortChain, mediumChain);
+            Set<Double> shortLongCommon = findCommonStrikesBetweenChains(shortChain, longChain);
+            
+            if (!shortMediumCommon.isEmpty() || !shortLongCommon.isEmpty()) {
+                // Use the best available common strikes
+                Set<Double> bestCommon = new HashSet<>();
+                if (!shortMediumCommon.isEmpty()) bestCommon.addAll(shortMediumCommon);
+                if (!shortLongCommon.isEmpty()) bestCommon.addAll(shortLongCommon);
+                return commonUtils.findClosestStrikeToPrice(bestCommon, currentPrice);
+            }
+            
+            // Last resort: use all strikes (original approach)
+            Set<Double> allStrikes = commonUtils.collectAllStrikesFromChains(shortChain, mediumChain, longChain);
+            return commonUtils.findClosestStrikeToPrice(allStrikes, currentPrice);
+                
+        } catch (Exception e) {
+            return -1.0;
+        }
+    }
+    
+    /**
+     * Find common strikes across all 3 chains
+     */
+    private Set<Double> findCommonStrikesAcrossAllChains(Map<String, OptionSnapshot> shortChain, 
+                                                        Map<String, OptionSnapshot> mediumChain, 
+                                                        Map<String, OptionSnapshot> longChain) {
+        Set<Double> shortStrikes = extractStrikesFromChain(shortChain);
+        Set<Double> mediumStrikes = extractStrikesFromChain(mediumChain);
+        Set<Double> longStrikes = extractStrikesFromChain(longChain);
         
-        public StockData(String ticker, double averageVolume, double rv30, double iv30, double termStructureSlope) {
-            this.ticker = ticker;
-            this.averageVolume = averageVolume;
-            this.rv30 = rv30;
+        Set<Double> common = new HashSet<>(shortStrikes);
+        common.retainAll(mediumStrikes);
+        common.retainAll(longStrikes);
+        
+        return common;
+    }
+    
+    /**
+     * Find common strikes between two chains
+     */
+    private Set<Double> findCommonStrikesBetweenChains(Map<String, OptionSnapshot> chain1, 
+                                                      Map<String, OptionSnapshot> chain2) {
+        Set<Double> strikes1 = extractStrikesFromChain(chain1);
+        Set<Double> strikes2 = extractStrikesFromChain(chain2);
+        
+        Set<Double> common = new HashSet<>(strikes1);
+        common.retainAll(strikes2);
+        
+        return common;
+    }
+    
+    /**
+     * Extract strikes from a single chain
+     */
+    private Set<Double> extractStrikesFromChain(Map<String, OptionSnapshot> chain) {
+        Set<Double> strikes = new HashSet<>();
+        if (chain != null && !chain.isEmpty()) {
+            chain.values().forEach(option -> strikes.add(option.getStrike()));
+        }
+        return strikes;
+    }
+    
+    /**
+     * Get IV for a specific strike in an option chain
+     */
+    private double getIVForStrike(Map<String, OptionSnapshot> optionChain, double targetStrike, String legName, Context context) {
+        return commonUtils.getIVForStrikeFromChain(optionChain, targetStrike, legName, context);
+    }
+    
+    // ===== HELPER METHODS FOR CODE REUSE =====
+    
+    /**
+     * Calculate term structure backwardation from IV data
+     */
+    private TermStructureResult calculateTermStructureBackwardation(TermStructureData termData) {
+        double maxLongTermIV = Math.max(termData.getIv30(), termData.getIv60());
+        double difference = termData.getIvEarningsWeek() - maxLongTermIV;
+        boolean passes = difference >= SLOPE_THRESHOLD;
+        
+        return new TermStructureResult(maxLongTermIV, difference, passes);
+    }
+    
+    /**
+     * Log term structure analysis results
+     */
+    private void logTermStructureResults(String ticker, TermStructureData termData, TermStructureResult result, Context context) {
+        String logMessage = String.format("%s term structure: IV_earnings=%.3f, IV30=%.3f, IV60=%.3f, max_long=%.3f, diff=%.3f (%s)",
+            ticker, termData.getIvEarningsWeek(), termData.getIv30(), termData.getIv60(), 
+            result.getMaxLongTermIV(), result.getDifference(), result.isPasses());
+        
+        context.getLogger().log(logMessage);
+    }
+    
+    
+    /**
+     * Data class for term structure information
+     */
+    private static class TermStructureData {
+        private final double ivEarningsWeek;
+        private final double iv30;
+        private final double iv60;
+        
+        public TermStructureData(double ivEarningsWeek, double iv30, double iv60) {
+            this.ivEarningsWeek = ivEarningsWeek;
             this.iv30 = iv30;
-            this.termStructureSlope = termStructureSlope;
+            this.iv60 = iv60;
         }
         
-        public String getTicker() { return ticker; }
-        public double getAverageVolume() { return averageVolume; }
-        public double getRv30() { return rv30; }
+        public double getIvEarningsWeek() { return ivEarningsWeek; }
         public double getIv30() { return iv30; }
-        public double getTermStructureSlope() { return termStructureSlope; }
+        public double getIv60() { return iv60; }
+    }
+    
+    /**
+     * Data class for term structure calculation results
+     */
+    private static class TermStructureResult {
+        private final double maxLongTermIV;
+        private final double difference;
+        private final boolean passes;
+        
+        public TermStructureResult(double maxLongTermIV, double difference, boolean passes) {
+            this.maxLongTermIV = maxLongTermIV;
+            this.difference = difference;
+            this.passes = passes;
+        }
+        
+        public double getMaxLongTermIV() { return maxLongTermIV; }
+        public double getDifference() { return difference; }
+        public boolean isPasses() { return passes; }
     }
 }

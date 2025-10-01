@@ -1,13 +1,14 @@
 package com.example;
 
 import com.amazonaws.services.lambda.runtime.Context;
-import com.example.AlpacaApiService.OptionSnapshot;
+import com.trading.common.OptionSelectionUtils;
+import com.trading.common.TradingCommonUtils;
+import com.trading.common.models.AlpacaCredentials;
 
 import java.time.LocalDate;
-import java.util.HashSet;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Filter for checking earnings stability
@@ -16,7 +17,6 @@ import java.util.Set;
  */
 public class EarningsStabilityFilter {
     
-    private final AlpacaApiService alpacaApiService;
     private final StockFilterCommonUtils commonUtils;
     
     // Thresholds
@@ -24,8 +24,7 @@ public class EarningsStabilityFilter {
     private final double EARNINGS_STABILITY_THRESHOLD;
     private final double STRADDLE_HISTORICAL_MULTIPLIER;
     
-    public EarningsStabilityFilter(AlpacaApiService alpacaApiService, StockFilterCommonUtils commonUtils) {
-        this.alpacaApiService = alpacaApiService;
+    public EarningsStabilityFilter(AlpacaCredentials credentials, StockFilterCommonUtils commonUtils) {
         this.commonUtils = commonUtils;
         
         // Load thresholds from environment
@@ -117,7 +116,7 @@ public class EarningsStabilityFilter {
         double totalWeight = 0.0;
         int validMoves = 0;
         
-        LocalDate cutoffDate = LocalDate.now().minusYears(2);
+        LocalDate cutoffDate = LocalDate.now(ZoneId.of("America/New_York")).minusYears(2);
         
         for (StockFilterCommonUtils.EarningsData earning : earningsData) {
             try {
@@ -127,7 +126,7 @@ public class EarningsStabilityFilter {
                     validMoves++;
                     
                     // Calculate weight based on recency
-                    double weight = calculateRecencyWeight(earning.getEarningsDate(), cutoffDate);
+                    double weight = commonUtils.calculateRecencyWeight(earning.getEarningsDate(), cutoffDate);
                     totalWeightedMove += actualMove * weight;
                     totalWeight += weight;
                     
@@ -151,17 +150,6 @@ public class EarningsStabilityFilter {
         return weightedAverageMove;
     }
     
-    /**
-     * Calculate recency weight for earnings data
-     * Recent earnings (last 2 years) get weight 2.0, older get weight 1.0
-     */
-    private double calculateRecencyWeight(LocalDate earningsDate, LocalDate cutoffDate) {
-        if (earningsDate.isAfter(cutoffDate)) {
-            return 2.0; // Recent earnings get double weight
-        } else {
-            return 1.0; // Older earnings get normal weight
-        }
-    }
     
     /**
      * Check historical stability using original threshold logic
@@ -202,7 +190,7 @@ public class EarningsStabilityFilter {
     }
     
     /**
-     * Get current straddle-implied move for the short leg (earnings +1 day)
+     * Get current straddle-implied move for the short leg using same logic as InitiateTradesLambda
      */
     private double getCurrentStraddleImpliedMove(String ticker, LocalDate earningsDate, Context context) {
         try {
@@ -213,43 +201,77 @@ public class EarningsStabilityFilter {
                 return 0.0;
             }
             
-            // Look for options expiring ±1 day around earnings +1 day, but cap at +7 days max
-            LocalDate targetExpiration = earningsDate.plusDays(1);
-            LocalDate expirationStart = targetExpiration.minusDays(1);
-            LocalDate expirationEnd = targetExpiration.plusDays(7); // Cap at +7 days maximum
-            
-            // Get option chains for both calls and puts
-            Map<String, OptionSnapshot> callChain = alpacaApiService.getOptionChain(
-                ticker, expirationStart, expirationEnd, "call");
-            Map<String, OptionSnapshot> putChain = alpacaApiService.getOptionChain(
-                ticker, expirationStart, expirationEnd, "put");
-            
-            if (callChain.isEmpty() && putChain.isEmpty()) {
-                context.getLogger().log("No options available for straddle calculation for " + ticker + 
-                    " expiring between " + expirationStart + " and " + expirationEnd);
+            // Get Alpaca credentials for API calls
+            AlpacaCredentials credentials = TradingCommonUtils.getAlpacaCredentials("trading/alpaca/credentials");
+            if (credentials == null) {
+                context.getLogger().log("No Alpaca credentials available for " + ticker);
                 return 0.0;
             }
             
-            // Find the best ATM strike using both calls and puts
-            double bestStrike = findBestATMStrike(callChain, putChain, currentPrice, targetExpiration);
+            // Use same data source as InitiateTradesLambda for consistency
+            LocalDate today = LocalDate.now(ZoneId.of("America/New_York"));
+            
+            // Fetch call and put option snapshots using shared method
+            Map<String, List<Map<String, Object>>> callContracts = OptionSelectionUtils.fetchOptionSnapshots(
+                ticker, credentials, "call", 60);
+            Map<String, List<Map<String, Object>>> putContracts = OptionSelectionUtils.fetchOptionSnapshots(
+                ticker, credentials, "put", 60);
+            
+            if (callContracts.isEmpty() && putContracts.isEmpty()) {
+                context.getLogger().log("No options available for straddle calculation for " + ticker);
+                return 0.0;
+            }
+            
+            // Find target expiration using same logic as InitiateTradesLambda
+            List<String> expirations = new java.util.ArrayList<>();
+            expirations.addAll(callContracts.keySet());
+            expirations.addAll(putContracts.keySet());
+            expirations = expirations.stream().distinct().sorted().collect(java.util.ArrayList::new, java.util.ArrayList::add, java.util.ArrayList::addAll);
+            
+            LocalDate targetExpiration = OptionSelectionUtils.findShortLegExpiration(expirations, today);
+            if (targetExpiration == null) {
+                context.getLogger().log("No suitable short leg expiration found for " + ticker);
+                return 0.0;
+            }
+            
+            // For straddle calculation, we only need one expiration, so find best strike at target expiration
+            List<Map<String, Object>> callContractsForExpiration = callContracts.get(targetExpiration.toString());
+            List<Map<String, Object>> putContractsForExpiration = putContracts.get(targetExpiration.toString());
+            
+            if (callContractsForExpiration == null || callContractsForExpiration.isEmpty() ||
+                putContractsForExpiration == null || putContractsForExpiration.isEmpty()) {
+                context.getLogger().log("No options available for straddle calculation at " + targetExpiration + " for " + ticker);
+                return 0.0;
+            }
+            
+            // Find the best ATM strike ensuring it exists in both call and put contracts
+            double bestStrike = OptionSelectionUtils.findATMStrikeForStraddle(
+                callContractsForExpiration, putContractsForExpiration, currentPrice);
             if (bestStrike < 0) {
-                context.getLogger().log("No suitable ATM strike found for straddle calculation for " + ticker);
+                context.getLogger().log("No suitable common ATM strike found for straddle calculation for " + ticker);
                 return 0.0;
             }
             
-            // Find call and put options for the best strike
-            OptionSnapshot atmCall = findOptionForStrike(callChain, bestStrike, targetExpiration);
-            OptionSnapshot atmPut = findOptionForStrike(putChain, bestStrike, targetExpiration);
+            // Find call and put options for the common strike using shared method
+            Map<String, Object>[] straddleOptions = OptionSelectionUtils.findStraddleOptionsForStrikeAndExpiration(
+                callContracts, putContracts, bestStrike, targetExpiration);
+            if (straddleOptions == null) {
+                context.getLogger().log("No straddle options found for strike " + bestStrike + " at " + targetExpiration + " for " + ticker);
+                return 0.0;
+            }
+            
+            Map<String, Object> atmCallContract = straddleOptions[0];
+            Map<String, Object> atmPutContract = straddleOptions[1];
             
             // Log expiration details for transparency
-            if (atmCall != null) {
-                LocalDate callExp = LocalDate.parse(atmCall.getExpiration());
+            if (atmCallContract != null) {
+                LocalDate callExp = LocalDate.parse((String) atmCallContract.get("expiration"));
                 long daysFromTarget = java.time.temporal.ChronoUnit.DAYS.between(targetExpiration, callExp);
                 context.getLogger().log(ticker + " selected call expiration: " + callExp + 
                     " (target: " + targetExpiration + ", days_diff: " + daysFromTarget + ")");
             }
-            if (atmPut != null) {
-                LocalDate putExp = LocalDate.parse(atmPut.getExpiration());
+            if (atmPutContract != null) {
+                LocalDate putExp = LocalDate.parse((String) atmPutContract.get("expiration"));
                 long daysFromTarget = java.time.temporal.ChronoUnit.DAYS.between(targetExpiration, putExp);
                 context.getLogger().log(ticker + " selected put expiration: " + putExp + 
                     " (target: " + targetExpiration + ", days_diff: " + daysFromTarget + ")");
@@ -258,10 +280,10 @@ public class EarningsStabilityFilter {
             // Calculate straddle price with flexible handling
             double straddlePrice;
             
-            if (atmCall != null && atmPut != null) {
+            if (atmCallContract != null && atmPutContract != null) {
                 // Full straddle: call + put with bid/ask sanity check
-                double callMid = validateBidAsk(atmCall.getBid(), atmCall.getAsk(), ticker + " call", context);
-                double putMid = validateBidAsk(atmPut.getBid(), atmPut.getAsk(), ticker + " put", context);
+                double callMid = commonUtils.getMidPriceFromContract(atmCallContract);
+                double putMid = commonUtils.getMidPriceFromContract(atmPutContract);
                 
                 if (callMid < 0 || putMid < 0) {
                     context.getLogger().log("Invalid bid/ask spreads for straddle calculation for " + ticker);
@@ -271,9 +293,9 @@ public class EarningsStabilityFilter {
                 straddlePrice = callMid + putMid;
                 context.getLogger().log(ticker + " using full straddle: call=" + String.format("%.2f", callMid) + 
                     ", put=" + String.format("%.2f", putMid) + ", strike=" + String.format("%.2f", bestStrike));
-            } else if (atmCall != null) {
+            } else if (atmCallContract != null) {
                 // Call-only straddle: double the call price as proxy with bid/ask sanity check
-                double callMid = validateBidAsk(atmCall.getBid(), atmCall.getAsk(), ticker + " call", context);
+                double callMid = commonUtils.getMidPriceFromContract(atmCallContract);
                 
                 if (callMid < 0) {
                     context.getLogger().log("Invalid bid/ask spread for call-only straddle calculation for " + ticker);
@@ -283,9 +305,9 @@ public class EarningsStabilityFilter {
                 straddlePrice = callMid * 2.0;
                 context.getLogger().log(ticker + " using call-only straddle: call=" + String.format("%.2f", callMid) + 
                     ", estimated_straddle=" + String.format("%.2f", straddlePrice) + ", strike=" + String.format("%.2f", bestStrike));
-            } else if (atmPut != null) {
+            } else if (atmPutContract != null) {
                 // Put-only straddle: double the put price as proxy with bid/ask sanity check
-                double putMid = validateBidAsk(atmPut.getBid(), atmPut.getAsk(), ticker + " put", context);
+                double putMid = commonUtils.getMidPriceFromContract(atmPutContract);
                 
                 if (putMid < 0) {
                     context.getLogger().log("Invalid bid/ask spread for put-only straddle calculation for " + ticker);
@@ -314,89 +336,5 @@ public class EarningsStabilityFilter {
         }
     }
     
-    /**
-     * Find the best ATM strike using both calls and puts
-     * Returns the strike closest to current price that has options available
-     */
-    private double findBestATMStrike(Map<String, OptionSnapshot> callChain, Map<String, OptionSnapshot> putChain, 
-                                   double currentPrice, LocalDate targetExpiration) {
-        // Collect all unique strikes from both chains
-        Set<Double> allStrikes = new HashSet<>();
-        callChain.values().forEach(option -> allStrikes.add(option.getStrike()));
-        putChain.values().forEach(option -> allStrikes.add(option.getStrike()));
-        
-        if (allStrikes.isEmpty()) {
-            return -1.0;
-        }
-        
-        // Find strike closest to current price
-        return allStrikes.stream()
-            .min((a, b) -> Double.compare(Math.abs(a - currentPrice), Math.abs(b - currentPrice)))
-            .orElse(-1.0);
-    }
-    
-    /**
-     * Find option for specific strike and expiration with tolerance limit
-     */
-    private OptionSnapshot findOptionForStrike(Map<String, OptionSnapshot> optionChain, double strike, LocalDate targetExpiration) {
-        if (optionChain.isEmpty()) {
-            return null;
-        }
-        
-        // First try exact expiration match
-        OptionSnapshot exactMatch = optionChain.values().stream()
-            .filter(option -> option.getStrike() == strike && 
-                             option.getExpiration().equals(targetExpiration.toString()))
-            .findFirst()
-            .orElse(null);
-        
-        if (exactMatch != null) {
-            return exactMatch;
-        }
-        
-        // If no exact match, find closest expiration for this strike within tolerance
-        LocalDate maxExpiration = targetExpiration.plusDays(7); // Cap at +7 days
-        
-        return optionChain.values().stream()
-            .filter(option -> {
-                if (option.getStrike() != strike) return false;
-                
-                LocalDate expDate = LocalDate.parse(option.getExpiration());
-                // Only consider options within 7 days of target AND after the target expiration
-                return !expDate.isAfter(maxExpiration) && !expDate.isBefore(targetExpiration);
-            })
-            .min((a, b) -> {
-                LocalDate expA = LocalDate.parse(a.getExpiration());
-                LocalDate expB = LocalDate.parse(b.getExpiration());
-                long daysDiffA = Math.abs(java.time.temporal.ChronoUnit.DAYS.between(targetExpiration, expA));
-                long daysDiffB = Math.abs(java.time.temporal.ChronoUnit.DAYS.between(targetExpiration, expB));
-                return Long.compare(daysDiffA, daysDiffB);
-            })
-            .orElse(null);
-    }
-    
-    /**
-     * Validate bid/ask prices and calculate mid price with sanity checks
-     * Returns -1 if bid/ask is invalid (zero mid or >50% spread)
-     */
-    private double validateBidAsk(double bid, double ask, String optionType, Context context) {
-        double mid = (bid + ask) / 2.0;
-        
-        // Check for invalid mid price
-        if (mid <= 0) {
-            context.getLogger().log("Invalid " + optionType + " mid price: bid=" + bid + ", ask=" + ask);
-            return -1.0;
-        }
-        
-        // Check for excessive spread (>50%)
-        double spreadRatio = (ask - bid) / Math.max(1e-6, mid);
-        if (spreadRatio > 0.5) {
-            context.getLogger().log("Excessive " + optionType + " spread: " + String.format("%.1f%%", spreadRatio * 100) + 
-                " (bid=" + bid + ", ask=" + ask + ", mid=" + String.format("%.2f", mid) + ")");
-            return -1.0;
-        }
-        
-        return mid;
-    }
     
 }

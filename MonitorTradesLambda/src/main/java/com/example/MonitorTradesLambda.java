@@ -4,10 +4,15 @@ import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.trading.common.TradingCommonUtils;
+import com.trading.common.JsonUtils;
 import com.trading.common.TradingErrorHandler;
+import com.trading.common.AlpacaHttpClient;
+import com.trading.common.JsonParsingUtils;
+import com.trading.common.PortfolioEquityValidator;
+import com.trading.common.OptionSymbolUtils;
 import com.trading.common.models.AlpacaCredentials;
 
-import java.time.LocalDateTime;
+import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
@@ -17,15 +22,13 @@ import java.util.*;
  * AWS Lambda function for monitoring active trading orders.
  * Monitors entry and exit orders every 30 seconds for 15 minutes with time-based logic.
  * 
- * TEMPORARY CHANGE: In Phase 2 (minutes 10-12), entry orders are now converted to market orders
- * instead of being canceled. This ensures we get filled on entry orders after 10 minutes
- * instead of giving up. The original cancellation logic is commented out for easy reversion.
+ * Phase 2 (minutes 10-13): Entry orders are canceled, exit orders are updated to 3% below market.
+ * Phase 3 (minutes 13+): Exit orders are converted to market orders.
  */
 public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, String> {
     
     private static final String ALPACA_SECRET = System.getenv("ALPACA_SECRET_NAME");
     private static final String ALPACA_URL = System.getenv("ALPACA_API_URL");
-    private static final String ALPACA_DATA_URL = "https://data.alpaca.markets/v1beta1";
     private static final double PRICE_CHANGE_THRESHOLD = 0.0005; // 0.05%
     private static final double EXIT_DISCOUNT = 0.97; // 3% below market price
     private static final ZoneId EST_ZONE = ZoneId.of("America/New_York");
@@ -63,7 +66,7 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
             AlpacaCredentials credentials = TradingCommonUtils.getAlpacaCredentials(ALPACA_SECRET);
             
             // Check if market is open
-            if (!TradingCommonUtils.isMarketOpen(credentials.getApiKeyId(), credentials.getSecretKey())) {
+            if (!AlpacaHttpClient.isMarketOpen(credentials)) {
                 context.getLogger().log("Market is closed, skipping monitoring");
                 return TradingErrorHandler.createSkippedResponse("market_closed", Map.of("orders_monitored", 0));
             }
@@ -76,7 +79,6 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
             int ordersUpdated = 0;
             int ordersCanceled = 0;
             int ordersConverted = 0;
-            int entryOrdersConverted = 0; // Track entry orders converted to market orders
             
             // Process each open order
             for (Map<String, Object> order : openOrders) {
@@ -102,8 +104,9 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
                     
                     context.getLogger().log("Processing order " + orderId + " for " + symbol + " (" + tradeType + ")");
                     
-                    // Parse submission time
-                    ZonedDateTime submissionTime = ZonedDateTime.parse(submissionTimeStr, DateTimeFormatter.ISO_ZONED_DATE_TIME);
+                    // Parse submission time and convert to EST
+                    ZonedDateTime submissionTime = ZonedDateTime.parse(submissionTimeStr, DateTimeFormatter.ISO_ZONED_DATE_TIME)
+                        .withZoneSameInstant(EST_ZONE);
                     ZonedDateTime now = ZonedDateTime.now(EST_ZONE);
                     
                     // Calculate time elapsed
@@ -115,7 +118,7 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
                     if (minutesElapsed < FIRST_PHASE_MINUTES) {
                         // First phase: Update limit price if spread changed significantly
                         double currentSpreadPrice = calculateCurrentSpreadPrice(order, credentials);
-                        if (currentSpreadPrice > 0) {
+                        if (currentSpreadPrice > 0 && currentLimitPrice > 0) {
                             double priceChangePercent = Math.abs(currentSpreadPrice - currentLimitPrice) / currentLimitPrice;
                             
                             if (priceChangePercent > PRICE_CHANGE_THRESHOLD) {
@@ -128,26 +131,11 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
                             }
                         }
                     } else if (minutesElapsed < SECOND_PHASE_MINUTES) {
-                        // Second phase: Convert entry orders to market orders, update exit orders to 3% below market
+                        // Second phase: Cancel entry orders, update exit orders to 3% below market
                         if ("entry".equals(tradeType)) {
-                            // TEMPORARY CHANGE: Convert entry orders to market orders instead of canceling
-                            // This ensures we get filled on entry orders after 10 minutes instead of giving up
-                            context.getLogger().log("Converting entry order " + orderId + " to market order after 10 minutes");
-                            
-                            // ORIGINAL CODE (COMMENTED OUT - TEMPORARY CHANGE):
-                            // context.getLogger().log("Canceling entry order " + orderId + " after 10 minutes");
-                            // if (cancelOrder(orderId, credentials)) {
-                            //     ordersCanceled++;
-                            // }
-                            
-                            // NEW CODE: Convert to market order for immediate execution
-                            if (cancelAndResubmitAsMarketOrder(order, credentials)) {
-                                ordersConverted++;
-                                entryOrdersConverted++; // Track entry order conversions separately
-                                TradingCommonUtils.logTradeSuccess(symbol, "entry_market_order_converted", context);
-                                context.getLogger().log("Successfully converted entry order " + orderId + " to market order");
-                            } else {
-                                TradingCommonUtils.logTradeFailure(symbol, "entry_market_order_conversion_failed", context);
+                            context.getLogger().log("Canceling entry order " + orderId + " after 10 minutes");
+                            if (cancelOrder(orderId, credentials)) {
+                                ordersCanceled++;
                             }
                         } else if ("exit".equals(tradeType)) {
                             double currentSpreadPrice = calculateCurrentSpreadPrice(order, credentials);
@@ -190,7 +178,6 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
                 "orders_updated", ordersUpdated,
                 "orders_canceled", ordersCanceled,
                 "orders_converted", ordersConverted,
-                "entry_orders_converted", entryOrdersConverted, // Track entry order conversions
                 "orders_monitored", openOrders.size()
             ));
             
@@ -209,8 +196,7 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
      */
     public boolean cancelOrder(String orderId, AlpacaCredentials credentials) {
         try {
-            String url = ALPACA_URL + "/v2/orders/" + orderId;
-            TradingCommonUtils.makeHttpRequest(url, credentials.getApiKeyId(), credentials.getSecretKey(), "DELETE", null);
+            AlpacaHttpClient.makeAlpacaRequest(ALPACA_URL + "/v2/orders/" + orderId, "DELETE", null, credentials);
             return true;
         } catch (Exception e) {
             throw new RuntimeException("Error canceling order " + orderId, e);
@@ -259,13 +245,13 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
             double spreadPrice;
             if ("entry".equals(tradeType)) {
                 // Entry: debit = far_ask - near_bid
-                double farAsk = getAskPrice(farQuote);
-                double nearBid = getBidPrice(nearQuote);
+                double farAsk = JsonParsingUtils.getAskPrice(farQuote);
+                double nearBid = JsonParsingUtils.getBidPrice(nearQuote);
                 spreadPrice = farAsk - nearBid;
             } else {
                 // Exit: credit = far_bid - near_ask
-                double farBid = getBidPrice(farQuote);
-                double nearAsk = getAskPrice(nearQuote);
+                double farBid = JsonParsingUtils.getBidPrice(farQuote);
+                double nearAsk = JsonParsingUtils.getAskPrice(nearQuote);
                 spreadPrice = farBid - nearAsk;
             }
             
@@ -283,10 +269,10 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
     private Map<String, JsonNode> getOptionQuotes(String farSymbol, String nearSymbol, AlpacaCredentials credentials) {
         try {
             String symbols = farSymbol + "," + nearSymbol;
-            String url = ALPACA_DATA_URL + "/options/quotes/latest?symbols=" + symbols + "&feed=indicative";
-            String responseBody = TradingCommonUtils.makeHttpRequest(url, credentials.getApiKeyId(), credentials.getSecretKey(), "GET", null);
+            String endpoint = "/options/quotes/latest?symbols=" + symbols + "&feed=opra";
+            String responseBody = AlpacaHttpClient.getAlpacaOptions(endpoint, credentials);
             
-            JsonNode quotesNode = TradingCommonUtils.parseJson(responseBody).get("quotes");
+            JsonNode quotesNode = JsonUtils.parseJson(responseBody).get("quotes");
             Map<String, JsonNode> quotes = new HashMap<>();
             
             if (quotesNode != null && quotesNode.isObject()) {
@@ -302,27 +288,15 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
         }
     }
     
-    public double getBidPrice(JsonNode quote) {
-        return getPrice(quote, "bp");
-    }
-    
-    public double getAskPrice(JsonNode quote) {
-        return getPrice(quote, "ap");
-    }
-    
-    public double getPrice(JsonNode quote, String field) {
-        return quote.has(field) ? quote.get(field).asDouble() : 0.0;
-    }
     
     /**
      * Updates order limit price via Alpaca API
      */
     public boolean updateOrderLimit(String orderId, double newLimitPrice, AlpacaCredentials credentials) {
         try {
-            String url = ALPACA_URL + "/v2/orders/" + orderId;
             Map<String, Object> updateData = Map.of("limit_price", newLimitPrice);
-            String jsonBody = TradingCommonUtils.toJson(updateData);
-            TradingCommonUtils.makeHttpRequest(url, credentials.getApiKeyId(), credentials.getSecretKey(), "PATCH", jsonBody);
+            String jsonBody = JsonUtils.toJson(updateData);
+            AlpacaHttpClient.makeAlpacaRequest(ALPACA_URL + "/v2/orders/" + orderId, "PATCH", jsonBody, credentials);
             return true;
         } catch (Exception e) {
             throw new RuntimeException("Error updating order limit for " + orderId, e);
@@ -342,8 +316,10 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
                 throw new RuntimeException("Failed to cancel order " + orderId);
             }
             
-            // Wait a moment for the cancellation to process
-            Thread.sleep(1000);
+            // Wait for cancellation to process with status verification
+            if (!waitForOrderCancellation(orderId, credentials)) {
+                throw new RuntimeException("Order " + orderId + " was not cancelled within timeout");
+            }
             
             // Resubmit with new limit price
             String newOrderId = resubmitOrderWithNewLimit(originalOrder, newLimitPrice, credentials);
@@ -358,6 +334,39 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
     }
     
     /**
+     * Wait for order cancellation with status verification
+     */
+    private boolean waitForOrderCancellation(String orderId, AlpacaCredentials credentials) {
+        int maxAttempts = 10;
+        int attempt = 0;
+        
+        while (attempt < maxAttempts) {
+            try {
+                // Remove blocking sleep - rely on API response timing
+                
+                // Check if order is actually cancelled
+                String responseBody = AlpacaHttpClient.getAlpacaTrading("/orders/" + orderId, credentials);
+                JsonNode orderNode = JsonUtils.parseJson(responseBody);
+                String status = orderNode.get("status").asText();
+                
+                if ("canceled".equals(status) || "rejected".equals(status)) {
+                    return true;
+                }
+                
+                attempt++;
+            } catch (Exception e) {
+                // If we can't check status, assume it's cancelled after timeout
+                if (attempt >= maxAttempts - 1) {
+                    return true;
+                }
+                attempt++;
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
      * Cancels an existing order and resubmits it as a market order
      */
     public boolean cancelAndResubmitAsMarketOrder(Map<String, Object> originalOrder, AlpacaCredentials credentials) {
@@ -369,8 +378,10 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
                 throw new RuntimeException("Failed to cancel order " + orderId);
             }
             
-            // Wait a moment for the cancellation to process
-            Thread.sleep(1000);
+            // Wait for cancellation to process with status verification
+            if (!waitForOrderCancellation(orderId, credentials)) {
+                throw new RuntimeException("Order " + orderId + " was not cancelled within timeout");
+            }
             
             // Resubmit as market order
             String newOrderId = submitMarketOrder(originalOrder, credentials);
@@ -389,7 +400,14 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
      */
     private String resubmitOrderWithNewLimit(Map<String, Object> originalOrder, double newLimitPrice, AlpacaCredentials credentials) {
         try {
-            String url = ALPACA_URL + "/v2/orders";
+            // Calculate trade value for equity check
+            int qty = Integer.parseInt(originalOrder.get("qty").toString());
+            double tradeValue = Math.abs(newLimitPrice * qty * 100); // 100 is contract multiplier
+            
+            // Check if we have sufficient equity for this trade
+            if (!PortfolioEquityValidator.hasSufficientEquity(tradeValue, credentials, null)) {
+                throw new RuntimeException("Insufficient equity for order resubmission: $" + String.format("%.2f", tradeValue));
+            }
             
             // Build the new order JSON with updated limit price
             Map<String, Object> newOrder = new HashMap<>();
@@ -401,10 +419,10 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
             newOrder.put("order_class", "mleg");
             newOrder.put("legs", originalOrder.get("legs"));
             
-            String jsonBody = TradingCommonUtils.toJson(newOrder);
-            String responseBody = TradingCommonUtils.makeHttpRequest(url, credentials.getApiKeyId(), credentials.getSecretKey(), "POST", jsonBody);
+            String jsonBody = JsonUtils.toJson(newOrder);
+            String responseBody = AlpacaHttpClient.postAlpacaTrading("/orders", jsonBody, credentials);
             
-            JsonNode response = TradingCommonUtils.parseJson(responseBody);
+            JsonNode response = JsonUtils.parseJson(responseBody);
             return response.get("id").asText();
         } catch (Exception e) {
             throw new RuntimeException("Error resubmitting order with new limit price", e);
@@ -416,20 +434,32 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
      */
     public String submitMarketOrder(Map<String, Object> originalOrder, AlpacaCredentials credentials) {
         try {
-            String url = ALPACA_URL + "/v2/orders";
+            // For market orders, we can't calculate exact trade value since we don't know the execution price
+            // We'll use the original limit price as a conservative estimate for equity validation
+            Double originalLimitPrice = (Double) originalOrder.get("limit_price");
+            if (originalLimitPrice != null) {
+                int qty = Integer.parseInt(originalOrder.get("qty").toString());
+                double estimatedTradeValue = Math.abs(originalLimitPrice * qty * 100); // 100 is contract multiplier
+                
+                // Check if we have sufficient equity for this trade
+                if (!PortfolioEquityValidator.hasSufficientEquity(estimatedTradeValue, credentials, null)) {
+                    throw new RuntimeException("Insufficient equity for market order: $" + String.format("%.2f", estimatedTradeValue));
+                }
+            }
             
-            // Build market order JSON
+            // Build market order JSON (no limit_price for market orders)
             Map<String, Object> marketOrder = new HashMap<>();
             marketOrder.put("symbol", originalOrder.get("symbol"));
             marketOrder.put("qty", originalOrder.get("qty"));
             marketOrder.put("type", "market");
             marketOrder.put("order_class", "mleg");
             marketOrder.put("legs", originalOrder.get("legs"));
+            // Note: market orders do NOT have a limit_price
             
-            String jsonBody = TradingCommonUtils.toJson(marketOrder);
-            String responseBody = TradingCommonUtils.makeHttpRequest(url, credentials.getApiKeyId(), credentials.getSecretKey(), "POST", jsonBody);
+            String jsonBody = JsonUtils.toJson(marketOrder);
+            String responseBody = AlpacaHttpClient.postAlpacaTrading("/orders", jsonBody, credentials);
             
-            JsonNode jsonNode = TradingCommonUtils.parseJson(responseBody);
+            JsonNode jsonNode = JsonUtils.parseJson(responseBody);
             return jsonNode.get("id").asText();
             
         } catch (Exception e) {
@@ -445,7 +475,7 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
      */
     public boolean isInMonitoringWindow(String dayType) {
         try {
-            LocalDateTime now = LocalDateTime.now(EST_ZONE);
+            ZonedDateTime now = ZonedDateTime.now(EST_ZONE);
             int hour = now.getHour();
             int minute = now.getMinute();
             
@@ -485,30 +515,63 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
             return null;
         }
         
-        // Look for buy and sell legs
-        boolean hasBuy = false;
-        boolean hasSell = false;
+        // For calendar spreads, determine entry/exit based on spread structure
+        // Entry: Buy far leg (longer expiration), sell near leg (shorter expiration)
+        // Exit: Sell far leg, buy near leg
+        return determineCalendarSpreadType(legs);
+    }
+    
+    /**
+     * Determine calendar spread type by analyzing expiration dates and sides
+     */
+    private String determineCalendarSpreadType(List<Map<String, Object>> legs) {
+        Map<String, Object> farLeg = null;
+        Map<String, Object> nearLeg = null;
         
+        // Find far and near legs by analyzing symbols for expiration dates
         for (Map<String, Object> leg : legs) {
-            String side = (String) leg.get("side");
-            if ("buy".equals(side)) {
-                hasBuy = true;
-            } else if ("sell".equals(side)) {
-                hasSell = true;
+            String symbol = (String) leg.get("symbol");
+            if (symbol != null) {
+                try {
+                    // Parse option symbol to get expiration
+                    Map<String, Object> parsed = OptionSymbolUtils.parseOptionSymbol(symbol);
+                    String expiration = (String) parsed.get("expiration");
+                    LocalDate expDate = LocalDate.parse(expiration);
+                    
+                    if (farLeg == null || nearLeg == null) {
+                        if (farLeg == null) {
+                            farLeg = leg;
+                        } else {
+                            nearLeg = leg;
+                        }
+                    } else {
+                        // Determine which is far/near based on expiration
+                        LocalDate farExp = LocalDate.parse((String) OptionSymbolUtils.parseOptionSymbol((String) farLeg.get("symbol")).get("expiration"));
+                        LocalDate nearExp = LocalDate.parse((String) OptionSymbolUtils.parseOptionSymbol((String) nearLeg.get("symbol")).get("expiration"));
+                        
+                        if (expDate.isAfter(farExp)) {
+                            nearLeg = farLeg;
+                            farLeg = leg;
+                        } else if (expDate.isBefore(nearExp)) {
+                            nearLeg = leg;
+                        }
+                    }
+                } catch (Exception e) {
+                    // Skip invalid symbols
+                    continue;
+                }
             }
         }
         
-        // Entry trade: buy far leg, sell near leg
-        // Exit trade: sell far leg, buy near leg
-        // For now, we'll determine based on the first leg's side
-        if (hasBuy && hasSell) {
-            // This is a spread trade - determine if entry or exit based on leg order
-            // For simplicity, we'll assume the first leg determines the trade type
-            String firstLegSide = (String) legs.get(0).get("side");
-            return "buy".equals(firstLegSide) ? "entry" : "exit";
+        if (farLeg == null || nearLeg == null) {
+            return null;
         }
         
-        return null;
+        // Determine trade type based on far leg side
+        // Entry: Buy far leg (longer expiration)
+        // Exit: Sell far leg (longer expiration)
+        String farLegSide = (String) farLeg.get("side");
+        return "buy".equals(farLegSide) ? "entry" : "exit";
     }
     
     /**
@@ -516,9 +579,8 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
      */
     public List<Map<String, Object>> getAllOpenOrders(AlpacaCredentials credentials) {
         try {
-            String url = ALPACA_URL + "/v2/orders?status=open&limit=100";
-            String responseBody = TradingCommonUtils.makeHttpRequest(url, credentials.getApiKeyId(), credentials.getSecretKey(), "GET", null);
-            JsonNode ordersNode = TradingCommonUtils.parseJson(responseBody);
+            String responseBody = AlpacaHttpClient.getAlpacaTrading("/orders?status=open&limit=100", credentials);
+            JsonNode ordersNode = JsonUtils.parseJson(responseBody);
             
             List<Map<String, Object>> openOrders = new ArrayList<>();
             if (ordersNode.isArray()) {

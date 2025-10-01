@@ -3,7 +3,10 @@ package com.trading;
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 import com.trading.common.TradingCommonUtils;
+import com.trading.common.JsonUtils;
 import com.trading.common.TradingErrorHandler;
+import com.trading.common.AlpacaHttpClient;
+import com.trading.common.models.AlpacaCredentials;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.BatchWriteItemRequest;
@@ -29,7 +32,7 @@ public class ScanEarningsLambda implements RequestHandler<Map<String, Object>, S
     }
     
     private String getFinnhubUrl() { return getEnvVar("FINNHUB_API_URL", "FINNHUB_API_URL"); }
-    private String getFinnhubSecret() { return getEnvVar("FINNHUB_SECRET_NAME", "FINNHUB_SECRET_NAME"); }
+    private String getFinnhubSecret() { return getEnvVar("FINNHUB_SECRET_NAME", "trading/finnhub/credentials"); }
     private String getDynamoDbTable() { return getEnvVar("DYNAMODB_TABLE", "DYNAMODB_TABLE"); }
     
     // Constants
@@ -73,9 +76,14 @@ public class ScanEarningsLambda implements RequestHandler<Map<String, Object>, S
                     String apiKey = alpacaCreds.get("apiKey");
                     String secretKey = alpacaCreds.get("secretKey");
                     
-                    if (apiKey != null && secretKey != null && !TradingCommonUtils.isMarketOpen(apiKey, secretKey)) {
-                        context.getLogger().log("Market is closed, skipping earnings scan");
-                        return TradingErrorHandler.createSkippedResponse("market_closed", Map.of("earnings_processed", 0));
+                    if (apiKey != null && secretKey != null) {
+                        com.trading.common.models.AlpacaCredentials alpacaCredentials = new com.trading.common.models.AlpacaCredentials();
+                        alpacaCredentials.setApiKey(apiKey);
+                        alpacaCredentials.setSecretKey(secretKey);
+                        if (!AlpacaHttpClient.isMarketOpen(alpacaCredentials)) {
+                            context.getLogger().log("Market is closed, skipping earnings scan");
+                            return TradingErrorHandler.createSkippedResponse("market_closed", Map.of("earnings_processed", 0));
+                        }
                     }
                 } catch (Exception e) {
                     context.getLogger().log("Error checking market status with Alpaca: " + e.getMessage());
@@ -123,10 +131,11 @@ public class ScanEarningsLambda implements RequestHandler<Map<String, Object>, S
             endDate.format(DateTimeFormatter.ISO_LOCAL_DATE),
             apiKey);
 
-        String responseBody = TradingCommonUtils.makeHttpRequest(url, apiKey, "", "GET", null);
+        // Note: This is a Finnhub API call, not Alpaca, so we use direct HTTP request
+        String responseBody = makeFinnhubRequest(url, apiKey);
 
         // Parse the response - Finnhub returns {"earningsCalendar": [...]}
-        com.fasterxml.jackson.databind.JsonNode responseNode = TradingCommonUtils.parseJson(responseBody);
+        com.fasterxml.jackson.databind.JsonNode responseNode = JsonUtils.parseJson(responseBody);
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> earningsList = (List<Map<String, Object>>) responseNode.get("earningsCalendar").traverse().readValueAs(List.class);
 
@@ -226,6 +235,20 @@ public class ScanEarningsLambda implements RequestHandler<Map<String, Object>, S
      */
     public Map<String, String> getApiKey(String secretName) {
         return TradingCommonUtils.getAlpacaCredentialsAsMap(secretName);
+    }
+
+    /**
+     * Makes HTTP request to Finnhub API
+     */
+    private String makeFinnhubRequest(String url, String apiKey) throws IOException {
+        try {
+            AlpacaCredentials credentials = new AlpacaCredentials();
+            credentials.setApiKey(apiKey);
+            credentials.setSecretKey(""); // Finnhub doesn't use secret key
+            return AlpacaHttpClient.makeAlpacaRequest(url, "GET", null, credentials);
+        } catch (Exception e) {
+            throw new IOException("Finnhub API request failed: " + e.getMessage(), e);
+        }
     }
 
 }

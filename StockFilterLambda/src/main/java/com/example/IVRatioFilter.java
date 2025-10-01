@@ -1,10 +1,12 @@
 package com.example;
 
 import com.amazonaws.services.lambda.runtime.Context;
-import com.example.AlpacaApiService.OptionSnapshot;
+import com.trading.common.models.OptionSnapshot;
+import com.trading.common.OptionSelectionUtils;
+import com.trading.common.models.AlpacaCredentials;
 
 import java.time.LocalDate;
-import java.util.List;
+import java.time.ZoneId;
 import java.util.Map;
 
 /**
@@ -13,63 +15,95 @@ import java.util.Map;
  */
 public class IVRatioFilter {
     
-    private final AlpacaApiService alpacaApiService;
+    private final AlpacaCredentials credentials;
     private final StockFilterCommonUtils commonUtils;
     
     // Thresholds
     private final double IV_RATIO_THRESHOLD;
     
-    public IVRatioFilter(AlpacaApiService alpacaApiService, StockFilterCommonUtils commonUtils) {
-        this.alpacaApiService = alpacaApiService;
+    public IVRatioFilter(AlpacaCredentials credentials, StockFilterCommonUtils commonUtils) {
+        this.credentials = credentials;
         this.commonUtils = commonUtils;
         
         // Load thresholds from environment
-        this.IV_RATIO_THRESHOLD = Double.parseDouble(System.getenv().getOrDefault("IV_RATIO_THRESHOLD", "1.2"));
+        this.IV_RATIO_THRESHOLD = Double.parseDouble(System.getenv().getOrDefault("IV_RATIO_THRESHOLD", "1.15"));
     }
     
     /**
-     * Check if stock has sufficient IV ratio for calendar spread
+     * Check if stock has sufficient IV ratio for debit calendar spread around earnings
+     * Compares short-term IV (earliest expiration after scan date) vs long-term IV (closest to 30 days from scan date)
+     * Higher short-term IV indicates potential volatility crush opportunity
+     * Uses scan date as base date - all filters find the same options
      */
     public boolean hasIVRatio(String ticker, LocalDate earningsDate, Context context) {
         try {
             double currentPrice = commonUtils.getCurrentStockPrice(ticker, context);
             if (currentPrice <= 0) return false;
             
-            double ivShort = getIVForShortLeg(ticker, earningsDate, currentPrice, context);
-            double ivLong = getIVForLongLeg(ticker, earningsDate, currentPrice, context);
+            LocalDate scanDate = LocalDate.now(ZoneId.of("America/New_York")); // Scan date = day before earnings
             
-            // If options data is available, use it
-            if (ivShort > 0 && ivLong > 0) {
-                double ivRatio = ivShort / ivLong;
-                boolean passes = ivRatio >= IV_RATIO_THRESHOLD;
-                
-                context.getLogger().log(ticker + " IV ratio (options): " + ivShort + "/" + ivLong + " = " + 
-                    String.format("%.3f", ivRatio) + " (" + passes + ")");
-                
-                return passes;
-            }
+            // Get wide range of options (1-60 days) to find proper legs
+            Map<String, OptionSnapshot> allOptions = getOptionChainForLeg(ticker, scanDate, 1, 60, context);
             
-            // Fallback to HV-based IV30/RV30 ratio
-            context.getLogger().log("No options IV data for " + ticker + ", using HV fallback");
-            StockData stockData = getRealStockData(ticker, context);
-            if (stockData == null) {
-                context.getLogger().log("No stock data available for HV fallback for " + ticker);
+            if (allOptions.isEmpty()) {
+                context.getLogger().log("No options data available for " + ticker + ", skipping IV ratio check");
                 return false;
             }
             
-            double iv30 = stockData.getIv30();
-            double rv30 = stockData.getRv30();
-            
-            if (iv30 <= 0 || rv30 <= 0) {
-                context.getLogger().log("No HV data available for " + ticker + ", failing filter");
+            // Find short leg using reusable logic - earliest expiration after scan date
+            LocalDate shortExpiration = com.trading.common.OptionSelectionUtils.findShortLegExpirationFromOptionChain(allOptions, scanDate);
+            if (shortExpiration == null) {
+                context.getLogger().log("No suitable short leg expiration found for " + ticker);
                 return false;
             }
             
-            double hvRatio = iv30 / rv30;
-            boolean passes = hvRatio >= IV_RATIO_THRESHOLD;
+            // Filter to short leg options only
+            Map<String, OptionSnapshot> shortChain = allOptions.entrySet().stream()
+                .filter(entry -> entry.getKey().equals(shortExpiration.toString()))
+                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
             
-            context.getLogger().log(ticker + " IV ratio (HV fallback): " + iv30 + "/" + rv30 + " = " + 
-                String.format("%.3f", hvRatio) + " (" + passes + ")");
+            // Find long leg using reusable logic - closest to 30 days from scan date
+            LocalDate longExpiration = com.trading.common.OptionSelectionUtils.findFarLegExpirationFromOptionChain(allOptions, scanDate, shortExpiration, 30);
+            if (longExpiration == null) {
+                context.getLogger().log("No suitable long leg expiration found for " + ticker);
+                return false;
+            }
+            
+            // Filter to long leg options only
+            Map<String, OptionSnapshot> longChain = allOptions.entrySet().stream()
+                .filter(entry -> entry.getKey().equals(longExpiration.toString()))
+                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+            
+            if (shortChain.isEmpty() || longChain.isEmpty()) {
+                context.getLogger().log("No options data available for " + ticker + ", skipping IV ratio check");
+                return false;
+            }
+            
+            // Find the best common strike for calendar spread
+            double bestStrike = OptionSelectionUtils.findBestCommonStrikeForCalendarSpreadFromOptionSnapshots(
+                shortChain, longChain, currentPrice);
+            
+            if (bestStrike < 0) {
+                context.getLogger().log("No common strikes found for calendar spread for " + ticker);
+                return false;
+            }
+            
+            // Get IV for both legs at the common strike
+            double ivShort = getIVForStrike(shortChain, bestStrike, context);
+            double ivLong = getIVForStrike(longChain, bestStrike, context);
+            
+            if (ivShort <= 0 || ivLong <= 0) {
+                context.getLogger().log("Invalid IV data for " + ticker + " at strike " + bestStrike);
+                return false;
+            }
+            
+            double ivRatio = ivShort / ivLong;
+            boolean passes = ivRatio >= IV_RATIO_THRESHOLD;
+            
+            context.getLogger().log(ticker + " Calendar spread IV ratio: " + 
+                String.format("%.3f", ivShort) + "/" + String.format("%.3f", ivLong) + " = " + 
+                String.format("%.3f", ivRatio) + " (strike: " + String.format("%.2f", bestStrike) + 
+                ", threshold: " + String.format("%.2f", IV_RATIO_THRESHOLD) + ", passes: " + passes + ")");
             
             return passes;
             
@@ -80,135 +114,28 @@ public class IVRatioFilter {
     }
     
     /**
-     * Get IV for short leg (earnings + 1 day)
+     * Get option chain for a specific leg with flexible date range
+     * @param ticker Stock ticker
+     * @param earningsDate Earnings date
+     * @param minDays Minimum days from earnings
+     * @param maxDays Maximum days from earnings
+     * @param context Lambda context
+     * @return Map of option snapshots by expiration
      */
-    private double getIVForShortLeg(String ticker, LocalDate earningsDate, double currentPrice, Context context) {
-        return getIVForLeg(ticker, earningsDate, 1, currentPrice, context);
+    private Map<String, OptionSnapshot> getOptionChainForLeg(String ticker, LocalDate earningsDate, 
+                                                           int minDays, int maxDays, Context context) {
+        return commonUtils.getOptionChainForDateRange(ticker, earningsDate, minDays, maxDays, "call", credentials, context);
     }
     
     /**
-     * Get IV for long leg (~30 days post-earnings)
+     * Get IV for a specific strike from an option chain
+     * @param optionChain Map of option snapshots by expiration
+     * @param strike Target strike price
+     * @param context Lambda context
+     * @return Implied volatility for the strike, or 0 if not found
      */
-    private double getIVForLongLeg(String ticker, LocalDate earningsDate, double currentPrice, Context context) {
-        return getIVForLeg(ticker, earningsDate, 30, currentPrice, context);
+    private double getIVForStrike(Map<String, OptionSnapshot> optionChain, double strike, Context context) {
+        return commonUtils.getIVForStrikeFromChain(optionChain, strike, "option", context);
     }
     
-    /**
-     * Get IV for specific leg based on earnings date and offset
-     */
-    private double getIVForLeg(String ticker, LocalDate earningsDate, int daysOffset, double currentPrice, Context context) {
-        try {
-            LocalDate expiration = earningsDate.plusDays(daysOffset);
-            return getIVForExpiration(ticker, expiration, currentPrice, context);
-        } catch (Exception e) {
-            context.getLogger().log("Error getting IV for leg (+" + daysOffset + " days): " + e.getMessage());
-            return 0.0;
-        }
-    }
-    
-    /**
-     * Get IV for specific expiration date
-     */
-    private double getIVForExpiration(String ticker, LocalDate expiration, double currentPrice, Context context) {
-        try {
-            // Get options chain for the expiration date
-            LocalDate startDate = expiration.minusDays(2);
-            LocalDate endDate = expiration.plusDays(2);
-            
-            Map<String, OptionSnapshot> optionChain = alpacaApiService.getOptionChain(
-                ticker, startDate, endDate, "call");
-            
-            if (optionChain.isEmpty()) {
-                context.getLogger().log("No options chain available for " + ticker + " at " + expiration);
-                return 0.0;
-            }
-            
-            // Find ATM call option
-            OptionSnapshot atmOption = commonUtils.findATMOption(optionChain, currentPrice);
-            if (atmOption == null) {
-                context.getLogger().log("No ATM option found for " + ticker + " at " + expiration);
-                return 0.0;
-            }
-            
-            double impliedVol = atmOption.getImpliedVol();
-            if (impliedVol <= 0) {
-                context.getLogger().log("Invalid implied volatility for " + ticker + " at " + expiration);
-                return 0.0;
-            }
-            
-            context.getLogger().log("Found IV for " + ticker + " at " + expiration + ": " + impliedVol);
-            return impliedVol;
-            
-        } catch (Exception e) {
-            context.getLogger().log("Error getting IV for expiration " + expiration + " for " + ticker + ": " + e.getMessage());
-            return 0.0;
-        }
-    }
-    
-    /**
-     * Get real stock data with simplified calculations
-     */
-    private StockData getRealStockData(String ticker, Context context) {
-        try {
-            // Get latest trade for current price and volume
-            AlpacaApiService.LatestTrade latestTrade = alpacaApiService.getLatestTrade(ticker);
-            if (latestTrade == null) {
-                context.getLogger().log("No trade data available for: " + ticker);
-                return null;
-            }
-            
-            // Get historical data for calculations
-            List<AlpacaApiService.HistoricalBar> historicalBars = alpacaApiService.getHistoricalBars(ticker, 90);
-            if (historicalBars == null || historicalBars.isEmpty()) {
-                context.getLogger().log("No historical data available for: " + ticker);
-                return null;
-            }
-            
-            // Sort historical bars by timestamp to ensure chronological order
-            historicalBars.sort((a, b) -> a.getTimestamp().compareTo(b.getTimestamp()));
-            
-            // Calculate average volume from historical data
-            double averageVolume = commonUtils.calculateAverageVolume(historicalBars);
-            
-            // Calculate RV30 (realized volatility)
-            double rv30 = commonUtils.calculateRV30(historicalBars, context);
-            
-            // Calculate IV30 (implied volatility - using HV as proxy)
-            double iv30 = commonUtils.calculateIV30(historicalBars, context);
-            
-            // Calculate term structure slope
-            double termSlope = commonUtils.calculateTermStructureSlope(historicalBars, context);
-            
-            return new StockData(ticker, averageVolume, rv30, iv30, termSlope);
-            
-        } catch (Exception e) {
-            context.getLogger().log("Error getting real stock data for " + ticker + ": " + e.getMessage());
-            return null;
-        }
-    }
-    
-    /**
-     * Data class for stock information
-     */
-    private static class StockData {
-        private final String ticker;
-        private final double averageVolume;
-        private final double rv30;
-        private final double iv30;
-        private final double termStructureSlope;
-        
-        public StockData(String ticker, double averageVolume, double rv30, double iv30, double termStructureSlope) {
-            this.ticker = ticker;
-            this.averageVolume = averageVolume;
-            this.rv30 = rv30;
-            this.iv30 = iv30;
-            this.termStructureSlope = termStructureSlope;
-        }
-        
-        public String getTicker() { return ticker; }
-        public double getAverageVolume() { return averageVolume; }
-        public double getRv30() { return rv30; }
-        public double getIv30() { return iv30; }
-        public double getTermStructureSlope() { return termStructureSlope; }
-    }
 }

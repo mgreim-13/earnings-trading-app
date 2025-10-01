@@ -15,7 +15,7 @@ Globals:
 Parameters:
   AlpacaSecretName:
     Type: String
-    Default: alpaca-api-keys
+    Default: trading/alpaca/credentials
     Description: Name of the Secrets Manager secret containing Alpaca API keys
 
 Resources:

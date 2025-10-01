@@ -18,7 +18,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <aws.sdk.version>2.21.29</aws.sdk.version>
         <jackson.version>2.15.2</jackson.version>
-        <httpclient.version>4.5.14</httpclient.version>
+        <okhttp.version>4.12.0</okhttp.version>
         <junit.version>5.9.3</junit.version>
         <mockito.version>5.8.0</mockito.version>
     </properties>
@@ -36,11 +36,12 @@
             <version>${aws.sdk.version}</version>
         </dependency>
 
-        <!-- Apache HttpClient for HTTP requests -->
+
+        <!-- OkHttp for modern HTTP requests -->
         <dependency>
-            <groupId>org.apache.httpcomponents</groupId>
-            <artifactId>httpclient</artifactId>
-            <version>${httpclient.version}</version>
+            <groupId>com.squareup.okhttp3</groupId>
+            <artifactId>okhttp</artifactId>
+            <version>${okhttp.version}</version>
         </dependency>
 
         <!-- Jackson for JSON processing -->

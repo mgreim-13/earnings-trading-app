@@ -53,7 +53,7 @@ Create a `.env` file or set environment variables:
 ```bash
 export FILTERED_TABLE="FilteredTickersTable"
 export ORDERS_TABLE="OrdersTable"
-export ALPACA_SECRET_NAME="alpaca-api-keys"
+export ALPACA_SECRET_NAME="trading/alpaca/credentials"
 export ALPACA_API_URL="https://paper-api.alpaca.markets/v2"
 ```
 
@@ -214,7 +214,7 @@ aws lambda create-function \
 |----------|-------------|---------|
 | `FILTERED_TABLE` | DynamoDB table for filtered tickers | `FilteredTickersTable` |
 | `ORDERS_TABLE` | DynamoDB table for order details | `OrdersTable` |
-| `ALPACA_SECRET_NAME` | Secrets Manager secret name | `alpaca-api-keys` |
+| `ALPACA_SECRET_NAME` | Secrets Manager secret name | `trading/alpaca/credentials` |
 | `ALPACA_API_URL` | Alpaca API base URL | `https://paper-api.alpaca.markets/v2` |
 
 ### IAM Permissions

@@ -77,7 +77,7 @@ Resources:
                   - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AlpacaSecretName}*'
                   - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${FinnhubSecretName}*'
               
-              # DynamoDB access - Dynamic table creation
+              # DynamoDB access - Dynamic table creation and cleanup
               - Effect: Allow
                 Action:
                   - dynamodb:CreateTable
@@ -90,6 +90,8 @@ Resources:
                   - dynamodb:UpdateItem
                   - dynamodb:DeleteItem
                   - dynamodb:BatchWriteItem
+                  - dynamodb:DeleteTable
+                  - dynamodb:UpdateTimeToLive
                 Resource:
                   - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Environment}-*'
                   - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Environment}-*/index/*'
@@ -342,31 +344,55 @@ Resources:
           Id: 'NormalInitiateExitTradesTarget'
           Input: '{"source": "initiate-exit-trades-schedule"}'
 
-  # MonitorTradesLambda runs every 30 seconds during specified windows
-  # Normal Day Morning Window (9:45:30-10:00 AM EST) - Every 30 seconds
+  # MonitorTradesLambda runs every minute during specified windows
+  # Normal Day Morning Window (9:46-10:00 AM EST) - Every minute
   NormalMonitorTradesRule1:
     Type: AWS::Events::Rule
     Properties:
       Name: !Sub '${Environment}-normal-monitor-trades-rule-1'
-      Description: 'Triggers MonitorTradesLambda every 30 seconds during 9:45:30-10:00 AM EST on normal trading days'
-      ScheduleExpression: 'cron(*/30 9 ? * MON-FRI *)'  # Every 30 seconds from 9:45-10:00 AM EST
+      Description: 'Triggers MonitorTradesLambda every minute during 9:46-10:00 AM EST on normal trading days'
+      ScheduleExpression: 'cron(46-59 9 ? * MON-FRI *)'  # 9:46-9:59 AM EST every minute
       State: ENABLED
       Targets:
         - Arn: !GetAtt MonitorTradesLambda.Arn
           Id: 'NormalMonitorTradesTarget1'
           Input: '{"source": "monitor-trades-schedule", "window": "morning", "dayType": "normal"}'
 
-  # Normal Day Afternoon Window (3:45:30-4:00 PM EST) - Every 30 seconds
+  NormalMonitorTradesRule1b:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-normal-monitor-trades-rule-1b'
+      Description: 'Triggers MonitorTradesLambda at 10:00 AM EST on normal trading days'
+      ScheduleExpression: 'cron(0 10 ? * MON-FRI *)'  # 10:00 AM EST
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt MonitorTradesLambda.Arn
+          Id: 'NormalMonitorTradesTarget1b'
+          Input: '{"source": "monitor-trades-schedule", "window": "morning", "dayType": "normal"}'
+
+  # Normal Day Afternoon Window (3:46-4:00 PM EST) - Every minute
   NormalMonitorTradesRule2:
     Type: AWS::Events::Rule
     Properties:
       Name: !Sub '${Environment}-normal-monitor-trades-rule-2'
-      Description: 'Triggers MonitorTradesLambda every 30 seconds during 3:45:30-4:00 PM EST on normal trading days'
-      ScheduleExpression: 'cron(*/30 15 ? * MON-FRI *)'  # Every 30 seconds from 3:45-4:00 PM EST
+      Description: 'Triggers MonitorTradesLambda every minute during 3:46-4:00 PM EST on normal trading days'
+      ScheduleExpression: 'cron(46-59 15 ? * MON-FRI *)'  # 3:46-3:59 PM EST every minute
       State: ENABLED
       Targets:
         - Arn: !GetAtt MonitorTradesLambda.Arn
           Id: 'NormalMonitorTradesTarget2'
+          Input: '{"source": "monitor-trades-schedule", "window": "afternoon", "dayType": "normal"}'
+
+  NormalMonitorTradesRule2b:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-normal-monitor-trades-rule-2b'
+      Description: 'Triggers MonitorTradesLambda at 4:00 PM EST on normal trading days'
+      ScheduleExpression: 'cron(0 16 ? * MON-FRI *)'  # 4:00 PM EST
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt MonitorTradesLambda.Arn
+          Id: 'NormalMonitorTradesTarget2b'
           Input: '{"source": "monitor-trades-schedule", "window": "afternoon", "dayType": "normal"}'
 
 
@@ -420,30 +446,54 @@ Resources:
           Input: '{"source": "initiate-exit-trades-schedule"}'
 
   # Early closure MonitorTradesLambda rules
-  # Early Closure Day Morning Window (9:45:30-10:00 AM EST) - Every 30 seconds
+  # Early Closure Day Morning Window (9:46-10:00 AM EST) - Every minute
   EarlyMonitorTradesRule1:
     Type: AWS::Events::Rule
     Properties:
       Name: !Sub '${Environment}-early-monitor-trades-rule-1'
-      Description: 'Triggers MonitorTradesLambda every 30 seconds during 9:45:30-10:00 AM EST on early closure days'
-      ScheduleExpression: 'cron(*/30 9 ? * MON-FRI *)'  # Every 30 seconds from 9:45-10:00 AM EST
+      Description: 'Triggers MonitorTradesLambda every minute during 9:46-10:00 AM EST on early closure days'
+      ScheduleExpression: 'cron(46-59 9 ? * MON-FRI *)'  # 9:46-9:59 AM EST every minute
       State: DISABLED  # Will be enabled dynamically
       Targets:
         - Arn: !GetAtt MonitorTradesLambda.Arn
           Id: 'EarlyMonitorTradesTarget1'
           Input: '{"source": "monitor-trades-schedule", "window": "morning", "dayType": "early"}'
 
-  # Early Closure Day Afternoon Window (12:45:30-1:00 PM EST) - Every 30 seconds
+  EarlyMonitorTradesRule1b:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-early-monitor-trades-rule-1b'
+      Description: 'Triggers MonitorTradesLambda at 10:00 AM EST on early closure days'
+      ScheduleExpression: 'cron(0 10 ? * MON-FRI *)'  # 10:00 AM EST
+      State: DISABLED  # Will be enabled dynamically
+      Targets:
+        - Arn: !GetAtt MonitorTradesLambda.Arn
+          Id: 'EarlyMonitorTradesTarget1b'
+          Input: '{"source": "monitor-trades-schedule", "window": "morning", "dayType": "early"}'
+
+  # Early Closure Day Afternoon Window (12:46-1:00 PM EST) - Every minute
   EarlyMonitorTradesRule2:
     Type: AWS::Events::Rule
     Properties:
       Name: !Sub '${Environment}-early-monitor-trades-rule-2'
-      Description: 'Triggers MonitorTradesLambda every 30 seconds during 12:45:30-1:00 PM EST on early closure days'
-      ScheduleExpression: 'cron(*/30 12 ? * MON-FRI *)'  # Every 30 seconds from 12:45-1:00 PM EST
+      Description: 'Triggers MonitorTradesLambda every minute during 12:46-1:00 PM EST on early closure days'
+      ScheduleExpression: 'cron(46-59 12 ? * MON-FRI *)'  # 12:46-12:59 PM EST every minute
       State: DISABLED  # Will be enabled dynamically
       Targets:
         - Arn: !GetAtt MonitorTradesLambda.Arn
           Id: 'EarlyMonitorTradesTarget2'
+          Input: '{"source": "monitor-trades-schedule", "window": "afternoon", "dayType": "early"}'
+
+  EarlyMonitorTradesRule2b:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-early-monitor-trades-rule-2b'
+      Description: 'Triggers MonitorTradesLambda at 1:00 PM EST on early closure days'
+      ScheduleExpression: 'cron(0 13 ? * MON-FRI *)'  # 1:00 PM EST
+      State: DISABLED  # Will be enabled dynamically
+      Targets:
+        - Arn: !GetAtt MonitorTradesLambda.Arn
+          Id: 'EarlyMonitorTradesTarget2b'
           Input: '{"source": "monitor-trades-schedule", "window": "afternoon", "dayType": "early"}'
 
   # Table Cleanup Rules - 30 minutes after ScanEarningsLambda

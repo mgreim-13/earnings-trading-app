@@ -18,7 +18,6 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <aws.sdk.version>2.21.29</aws.sdk.version>
         <jackson.version>2.15.2</jackson.version>
-        <httpclient.version>4.5.14</httpclient.version>
         <junit.version>5.9.3</junit.version>
         <mockito.version>5.8.0</mockito.version>
         <trading.common.version>1.0.0</trading.common.version>
@@ -42,12 +41,6 @@
             <version>${aws.sdk.version}</version>
         </dependency>
 
-        <!-- Apache HttpClient for HTTP requests -->
-        <dependency>
-            <groupId>org.apache.httpcomponents</groupId>
-            <artifactId>httpclient</artifactId>
-            <version>${httpclient.version}</version>
-        </dependency>
 
         <!-- Jackson for JSON processing -->
         <dependency>

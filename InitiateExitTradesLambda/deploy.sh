@@ -67,7 +67,7 @@ aws lambda create-function \
     --zip-file fileb://$JAR_FILE \
     --timeout 30 \
     --memory-size 512 \
-    --environment Variables='{ALPACA_SECRET_NAME=alpaca-trading-credentials,PAPER_TRADING=true,AWS_REGION='$REGION'}' \
+    --environment Variables='{ALPACA_SECRET_NAME=trading/alpaca/credentials,PAPER_TRADING=true,AWS_REGION='$REGION'}' \
     2>/dev/null || aws lambda update-function-code \
     --function-name $FUNCTION_NAME \
     --zip-file fileb://$JAR_FILE

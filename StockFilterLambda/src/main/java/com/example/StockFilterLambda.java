@@ -2,8 +2,12 @@ package com.example;
 
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
-import com.trading.common.TradingCommonUtils;
 import com.trading.common.TradingErrorHandler;
+
+import com.trading.common.models.HistoricalBar;
+import com.trading.common.models.AlpacaCredentials;
+import com.trading.common.models.StockData;
+import com.trading.common.OptionSelectionUtils;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.*;
 
@@ -13,6 +17,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 import java.time.LocalDate;
+import java.time.ZoneId;
 
 /**
  * AWS Lambda function for filtering stocks based on volume, volatility, and options data.
@@ -24,38 +29,32 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
     private static final String FILTERED_TABLE = System.getenv("FILTERED_TABLE");
     
     // Thresholds
-    private static final double VOLUME_THRESHOLD = Double.parseDouble(System.getenv().getOrDefault("VOLUME_THRESHOLD", "1000000"));
-    private static final int MIN_SCORE_THRESHOLD = Integer.parseInt(System.getenv().getOrDefault("MIN_SCORE_THRESHOLD", "7"));
+    private static final double VOLUME_THRESHOLD = Double.parseDouble(System.getenv().getOrDefault("VOLUME_THRESHOLD", "2000000"));
+    private static final double IV_RATIO_THRESHOLD = Double.parseDouble(System.getenv().getOrDefault("IV_RATIO_THRESHOLD", "1.15"));
     
     // Services
-    private final AlpacaApiService alpacaApiService;
+    private final AlpacaCredentials credentials;
     private final StockFilterCommonUtils commonUtils;
-    private final LiquidityFilter liquidityFilter;
-    private final IVRatioFilter ivRatioFilter;
-    private final TermStructureFilter termStructureFilter;
-    private final VolatilityCrushFilter volatilityCrushFilter;
-    private final EarningsStabilityFilter earningsStabilityFilter;
-    private final ExecutionSpreadFilter executionSpreadFilter;
+    
+    // Caching for efficiency
+    private final CacheManager cacheManager;
+    private final DynamoDbClient dynamoDbClient = DynamoDbClient.create();
     
     public StockFilterLambda() {
         String apiKey = System.getenv("ALPACA_API_KEY");
         String secretKey = System.getenv("ALPACA_SECRET_KEY");
-        boolean usePaperTrading = Boolean.parseBoolean(System.getenv().getOrDefault("ALPACA_PAPER_TRADING", "true"));
         
-        this.alpacaApiService = new AlpacaApiService(apiKey, secretKey, usePaperTrading);
-        this.commonUtils = new StockFilterCommonUtils(alpacaApiService);
-        this.liquidityFilter = new LiquidityFilter(alpacaApiService, commonUtils);
-        this.ivRatioFilter = new IVRatioFilter(alpacaApiService, commonUtils);
-        this.termStructureFilter = new TermStructureFilter(alpacaApiService, commonUtils);
-        this.volatilityCrushFilter = new VolatilityCrushFilter(alpacaApiService, commonUtils);
-        this.earningsStabilityFilter = new EarningsStabilityFilter(alpacaApiService, commonUtils);
-        this.executionSpreadFilter = new ExecutionSpreadFilter(alpacaApiService, commonUtils);
+        this.credentials = new AlpacaCredentials();
+        this.credentials.setApiKey(apiKey);
+        this.credentials.setSecretKey(secretKey);
+        this.commonUtils = new StockFilterCommonUtils(credentials);
+        this.cacheManager = new CacheManager(credentials, commonUtils);
     }
     
     @Override
     public String handleRequest(Map<String, Object> input, Context context) {
         try {
-            final String scanDate = (String) input.getOrDefault("scanDate", LocalDate.now().toString());
+            final String scanDate = (String) input.getOrDefault("scanDate", LocalDate.now(ZoneId.of("America/New_York")).toString());
             
             context.getLogger().log("Starting stock filter scan for date: " + scanDate);
             
@@ -69,25 +68,16 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
             context.getLogger().log("Found " + tickers.size() + " tickers to process");
             
             // Process tickers in parallel
-            ExecutorService executor = Executors.newFixedThreadPool(10);
-            List<CompletableFuture<Map<String, Object>>> futures = tickers.stream()
-                .map(ticker -> CompletableFuture.supplyAsync(() -> 
-                    evaluateStockRecommendation(ticker, scanDate, context), executor))
-                .collect(Collectors.toList());
-            
-            // Wait for all evaluations to complete
-            List<Map<String, Object>> recommendationResults = futures.stream()
-                .map(CompletableFuture::join)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toList());
-            
-            executor.shutdown();
+            List<Map<String, Object>> recommendationResults = processTickersInParallel(tickers, scanDate, context);
             
             context.getLogger().log("Completed evaluation of " + tickers.size() + " tickers, " + 
                 recommendationResults.size() + " recommendations");
             
             // Write results to filtered table
             int writtenCount = writeResultsToFilteredTable(scanDate, recommendationResults, context);
+            
+            // Log cache statistics
+            cacheManager.logCacheStatistics(context);
             
             return "Successfully processed " + tickers.size() + " tickers, " + 
                 recommendationResults.size() + " recommendations, " + writtenCount + " written to table";
@@ -100,12 +90,53 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
     }
     
     /**
+     * Process tickers in parallel using thread pool
+     */
+    private List<Map<String, Object>> processTickersInParallel(List<String> tickers, String scanDate, Context context) {
+        ExecutorService executor = Executors.newFixedThreadPool(10);
+        try {
+            List<CompletableFuture<Map<String, Object>>> futures = tickers.stream()
+                .map(ticker -> CompletableFuture.supplyAsync(() -> 
+                    evaluateStockRecommendation(ticker, scanDate, context), executor))
+                .collect(Collectors.toList());
+            
+            // Wait for all evaluations to complete
+            return futures.stream()
+                .map(CompletableFuture::join)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+        } finally {
+            executor.shutdown();
+            try {
+                if (!executor.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS)) {
+                    executor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                executor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+    
+    /**
      * Query tickers from earnings table for the given scan date
      */
     private List<String> queryTickersFromEarningsTable(String scanDate, Context context) {
         try {
-            DynamoDbClient dynamoDbClient = DynamoDbClient.create();
-            
+            ScanResponse scanResponse = executeEarningsTableScan(dynamoDbClient, scanDate);
+            return extractTickersFromScanResponse(scanResponse);
+        } catch (Exception e) {
+            context.getLogger().log("Error querying earnings table: " + e.getMessage());
+            e.printStackTrace();
+            // Return empty list but log the error for debugging
+            return new ArrayList<>();
+        }
+    }
+    
+    /**
+     * Execute scan request on earnings table
+     */
+    private ScanResponse executeEarningsTableScan(DynamoDbClient dynamoDbClient, String scanDate) {
             ScanRequest scanRequest = ScanRequest.builder()
                 .tableName(EARNINGS_TABLE)
                 .filterExpression("scanDate = :scanDate")
@@ -114,50 +145,67 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
                 ))
                 .build();
             
-            ScanResponse scanResponse = dynamoDbClient.scan(scanRequest);
+        return dynamoDbClient.scan(scanRequest);
+    }
             
+    /**
+     * Extract ticker symbols from DynamoDB scan response
+     */
+    private List<String> extractTickersFromScanResponse(ScanResponse scanResponse) {
             return scanResponse.items().stream()
                 .map(item -> item.get("ticker").s())
                 .collect(Collectors.toList());
-                
-        } catch (Exception e) {
-            context.getLogger().log("Error querying earnings table: " + e.getMessage());
-            return new ArrayList<>();
-        }
     }
     
     /**
-     * Evaluate a single stock recommendation using all filters
+     * Evaluate a single stock recommendation using gatekeeper system
      */
     private Map<String, Object> evaluateStockRecommendation(String ticker, String scanDate, Context context) {
         try {
-            // Get earnings date for the ticker
-            LocalDate earningsDate = getEarningsDateForTicker(ticker, scanDate, context);
+            // Validate prerequisites
+            LocalDate earningsDate = validateAndGetEarningsDate(ticker, scanDate, context);
             if (earningsDate == null) {
-                context.getLogger().log("No earnings date found for " + ticker);
                 return null;
             }
             
-            // Get stock data for volume check
-            StockData stockData = getRealStockData(ticker, context);
+            StockData stockData = cacheManager.getCachedStockData(ticker, context);
             if (stockData == null) {
-                context.getLogger().log("No stock data available for " + ticker);
                 return null;
             }
             
-            double avgVolume = stockData.getAverageVolume();
-            
-            // Evaluate all filters
-            Map<String, Object> filterResults = evaluateFilters(avgVolume, ticker, earningsDate, context);
-            if (filterResults == null) {
+            // Early exit: Quick volume check before expensive operations
+            if (stockData.getAverageVolume() < VOLUME_THRESHOLD) {
+                context.getLogger().log(ticker + " failed early volume check: " + 
+                    String.format("%.0f", stockData.getAverageVolume()) + " < " + VOLUME_THRESHOLD);
                 return null;
             }
             
-            // Add ticker and scan date to results
-            filterResults.put("ticker", ticker);
-            filterResults.put("scanDate", scanDate);
+            // Evaluate using gatekeeper system
+            TradeDecision decision = evaluateTradeWithGatekeepers(ticker, earningsDate, context);
             
-            return filterResults;
+            if (!decision.isApproved()) {
+                context.getLogger().log(ticker + " REJECTED: " + decision.getReason());
+                return null;
+            }
+            
+            // Build result with position sizing
+            Map<String, Object> result = new HashMap<>();
+            result.put("status", "Recommended");
+            result.put("positionSizePercentage", decision.getPositionSizePercentage());
+            result.put("reason", decision.getReason());
+            result.put("earningsDate", earningsDate.toString());
+            result.put("avgVolume", stockData.getAverageVolume());
+            
+            // Add filter results for transparency
+            result.putAll(decision.getFilterResults());
+            
+            // Add metadata
+            addMetadataToResults(result, ticker, scanDate);
+            
+            context.getLogger().log(ticker + " RECOMMENDED: " + decision.getReason() + 
+                " (position size: " + String.format("%.1f%%", decision.getPositionSizePercentage() * 100) + ")");
+            
+            return result;
             
         } catch (Exception e) {
             context.getLogger().log("Error evaluating stock recommendation for " + ticker + ": " + e.getMessage());
@@ -166,12 +214,41 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
     }
     
     /**
+     * Validate and get earnings date for ticker
+     */
+    private LocalDate validateAndGetEarningsDate(String ticker, String scanDate, Context context) {
+        LocalDate earningsDate = getEarningsDateForTicker(ticker, scanDate, context);
+        if (earningsDate == null) {
+            context.getLogger().log("No earnings date found for " + ticker);
+        }
+        return earningsDate;
+    }
+    
+    /**
+     * Add metadata (ticker and scan date) to results
+     */
+    private void addMetadataToResults(Map<String, Object> filterResults, String ticker, String scanDate) {
+        filterResults.put("ticker", ticker);
+        filterResults.put("scanDate", scanDate);
+    }
+    
+    /**
      * Get earnings date for a ticker
      */
     private LocalDate getEarningsDateForTicker(String ticker, String scanDate, Context context) {
         try {
-            DynamoDbClient dynamoDbClient = DynamoDbClient.create();
-            
+            GetItemResponse getItemResponse = executeEarningsTableGetItem(dynamoDbClient, ticker, scanDate);
+            return extractEarningsDateFromResponse(getItemResponse);
+        } catch (Exception e) {
+            context.getLogger().log("Error getting earnings date for " + ticker + ": " + e.getMessage());
+            return null;
+        }
+    }
+    
+    /**
+     * Execute get item request on earnings table
+     */
+    private GetItemResponse executeEarningsTableGetItem(DynamoDbClient dynamoDbClient, String ticker, String scanDate) {
             GetItemRequest getItemRequest = GetItemRequest.builder()
                 .tableName(EARNINGS_TABLE)
                 .key(Map.of(
@@ -180,72 +257,23 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
                 ))
                 .build();
             
-            GetItemResponse getItemResponse = dynamoDbClient.getItem(getItemRequest);
+        return dynamoDbClient.getItem(getItemRequest);
+    }
             
+    /**
+     * Extract earnings date from DynamoDB get item response
+     */
+    private LocalDate extractEarningsDateFromResponse(GetItemResponse getItemResponse) {
             if (getItemResponse.item().containsKey("earningsDate")) {
                 String earningsDateStr = getItemResponse.item().get("earningsDate").s();
                 return LocalDate.parse(earningsDateStr);
             }
-            
             return null;
-            
-        } catch (Exception e) {
-            context.getLogger().log("Error getting earnings date for " + ticker + ": " + e.getMessage());
-            return null;
-        }
     }
     
-    /**
-     * Evaluate all filters with weighted scoring system
-     */
-    private Map<String, Object> evaluateFilters(double avgVolume, String ticker, LocalDate earningsDate, Context context) {
-        // Define filters with their weights
-        FilterResult[] filters = {
-            evaluateLiquidityFilter(ticker, avgVolume, context),
-            evaluateFilter("IV_Ratio", ivRatioFilter.hasIVRatio(ticker, earningsDate, context), 2, context, ticker),
-            evaluateFilter("Term_Structure", termStructureFilter.hasTermStructureBackwardation(ticker, earningsDate, context), 1, context, ticker),
-            evaluateFilter("Vol_Crush", volatilityCrushFilter.hasHistoricalVolatilityCrush(ticker, context), 1, context, ticker),
-            earningsStabilityFilter.hasHistoricalEarningsStability(ticker, earningsDate, context),
-            evaluateFilter("Execution_Spread", executionSpreadFilter.hasExecutionSpreadFeasibility(ticker, earningsDate, context), 3, context, ticker)
-        };
-        
-        // Calculate total score
-        int totalScore = Arrays.stream(filters).mapToInt(FilterResult::getScore).sum();
-        
-        // Check if passes threshold
-        if (totalScore < MIN_SCORE_THRESHOLD) {
-            context.getLogger().log(ticker + " failed scoring: " + totalScore + "/" + MIN_SCORE_THRESHOLD);
-            return null;
-        }
-        
-        // Build result
-        Map<String, Object> result = new HashMap<>();
-        result.put("recommendationScore", totalScore);
-        result.put("status", "Recommended");
-        result.put("avgVolume", avgVolume);
-        result.put("earningsDate", earningsDate.toString());
-        
-        // Add filter results
-        for (FilterResult filter : filters) {
-            result.put(filter.getName().toLowerCase() + "Score", filter.getScore());
-            result.put(filter.getName().toLowerCase() + "Passed", filter.isPassed());
-        }
-        
-        context.getLogger().log(ticker + " passed scoring: " + totalScore + "/" + MIN_SCORE_THRESHOLD);
-        return result;
-    }
     
-    /**
-     * Special handling for liquidity filter (partial credit)
-     */
-    private FilterResult evaluateLiquidityFilter(String ticker, double avgVolume, Context context) {
-        boolean volumePassed = avgVolume >= VOLUME_THRESHOLD;
-        boolean optionsLiquidityPassed = liquidityFilter.hasOptionsLiquidity(ticker, context);
-        int score = optionsLiquidityPassed ? 2 : (volumePassed ? 1 : 0);
-        context.getLogger().log(ticker + " Liquidity filter: volume=" + volumePassed + 
-            ", options=" + optionsLiquidityPassed + " (score: " + score + ")");
-        return new FilterResult("Liquidity", score > 0, score);
-    }
+    
+    
     
     /**
      * Evaluate a filter and return standardized result
@@ -255,6 +283,141 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
         return new FilterResult(name, passed, score);
     }
     
+    // ===== GATEKEEPER SYSTEM METHODS =====
+    
+    /**
+     * Evaluate trade using gatekeeper system (4 gatekeepers + 2 optional)
+     */
+    private TradeDecision evaluateTradeWithGatekeepers(String ticker, LocalDate earningsDate, Context context) {
+        Map<String, Boolean> filterResults = new HashMap<>();
+        
+        // Gatekeeper 1: Liquidity
+        boolean liquidityPassed = evaluateLiquidityGatekeeper(ticker, context);
+        filterResults.put("liquidityPassed", liquidityPassed);
+        if (!liquidityPassed) {
+            return new TradeDecision(false, "Insufficient liquidity", 0.0, filterResults);
+        }
+        
+        // Gatekeeper 2: IV Ratio
+        boolean ivRatioPassed = evaluateIVRatioGatekeeper(ticker, earningsDate, context);
+        filterResults.put("ivRatioPassed", ivRatioPassed);
+        if (!ivRatioPassed) {
+            return new TradeDecision(false, "No IV skew", 0.0, filterResults);
+        }
+        
+        // Gatekeeper 3: Term Structure
+        boolean termStructurePassed = evaluateTermStructureGatekeeper(ticker, earningsDate, context);
+        filterResults.put("termStructurePassed", termStructurePassed);
+        if (!termStructurePassed) {
+            return new TradeDecision(false, "No term structure backwardation", 0.0, filterResults);
+        }
+        
+        // Gatekeeper 4: Execution Spread
+        boolean executionSpreadPassed = evaluateExecutionSpreadGatekeeper(ticker, earningsDate, context);
+        filterResults.put("executionSpreadPassed", executionSpreadPassed);
+        if (!executionSpreadPassed) {
+            return new TradeDecision(false, "Poor execution spread", 0.0, filterResults);
+        }
+        
+        // All gatekeepers passed - calculate position size
+        double positionSize = calculatePositionSize(ticker, earningsDate, context, filterResults);
+        
+        return new TradeDecision(true, "All gatekeepers passed", positionSize, filterResults);
+    }
+    
+    /**
+     * Calculate position size based on optional filters
+     */
+    private double calculatePositionSize(String ticker, LocalDate earningsDate, Context context, Map<String, Boolean> filterResults) {
+        double baseInvestment = 0.05; // 5% base
+        double additionalInvestment = 0.0;
+        
+        // Optional filter 1: Volatility Crush History
+        boolean volatilityCrushPassed = evaluateVolatilityCrushOptional(ticker, context);
+        filterResults.put("volatilityCrushPassed", volatilityCrushPassed);
+        if (volatilityCrushPassed) {
+            additionalInvestment += 0.01; // +1%
+        }
+        
+        // Optional filter 2: Earnings Stability
+        boolean earningsStabilityPassed = evaluateEarningsStabilityOptional(ticker, earningsDate, context);
+        filterResults.put("earningsStabilityPassed", earningsStabilityPassed);
+        if (earningsStabilityPassed) {
+            additionalInvestment += 0.01; // +1%
+        }
+        
+        double totalPercentage = baseInvestment + additionalInvestment;
+        
+        
+        context.getLogger().log(ticker + " position sizing: base=5%, additional=" + 
+            String.format("%.1f%%", additionalInvestment * 100) + ", total=" + 
+            String.format("%.1f%%", totalPercentage * 100));
+        
+        return totalPercentage;
+    }
+    
+    // ===== GATEKEEPER HELPER METHODS =====
+    
+    private boolean evaluateLiquidityGatekeeper(String ticker, Context context) {
+        try {
+            // Reuse existing liquidity filter logic
+            return evaluateLiquidityFilterWithCachedData(ticker, 0, null, null, context).isPassed();
+        } catch (Exception e) {
+            context.getLogger().log("Error in liquidity gatekeeper for " + ticker + ": " + e.getMessage());
+            return false;
+        }
+    }
+    
+    private boolean evaluateIVRatioGatekeeper(String ticker, LocalDate earningsDate, Context context) {
+        try {
+            // Reuse existing IV ratio filter logic
+            return evaluateIVRatioFilterWithCachedData(ticker, earningsDate, null, null, context).isPassed();
+        } catch (Exception e) {
+            context.getLogger().log("Error in IV ratio gatekeeper for " + ticker + ": " + e.getMessage());
+            return false;
+        }
+    }
+    
+    private boolean evaluateTermStructureGatekeeper(String ticker, LocalDate earningsDate, Context context) {
+        try {
+            // Reuse existing term structure filter logic
+            return evaluateTermStructureFilterWithCachedData(ticker, earningsDate, null, null, context).isPassed();
+        } catch (Exception e) {
+            context.getLogger().log("Error in term structure gatekeeper for " + ticker + ": " + e.getMessage());
+            return false;
+        }
+    }
+    
+    private boolean evaluateExecutionSpreadGatekeeper(String ticker, LocalDate earningsDate, Context context) {
+        try {
+            // Reuse existing execution spread filter logic
+            return evaluateExecutionSpreadFilterWithCachedData(ticker, earningsDate, null, null, context).isPassed();
+        } catch (Exception e) {
+            context.getLogger().log("Error in execution spread gatekeeper for " + ticker + ": " + e.getMessage());
+            return false;
+        }
+    }
+    
+    private boolean evaluateVolatilityCrushOptional(String ticker, Context context) {
+        try {
+            // Reuse existing volatility crush filter logic
+            return evaluateVolatilityCrushFilterWithCachedData(ticker, context).isPassed();
+        } catch (Exception e) {
+            context.getLogger().log("Error in volatility crush optional for " + ticker + ": " + e.getMessage());
+            return false;
+        }
+    }
+    
+    private boolean evaluateEarningsStabilityOptional(String ticker, LocalDate earningsDate, Context context) {
+        try {
+            // Reuse existing earnings stability filter logic
+            return evaluateEarningsStabilityFilterWithCachedData(ticker, earningsDate, null, null, context).isPassed();
+        } catch (Exception e) {
+            context.getLogger().log("Error in earnings stability optional for " + ticker + ": " + e.getMessage());
+            return false;
+        }
+    }
+    
     /**
      * Write results to filtered table
      */
@@ -262,52 +425,14 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
         int successfullyWrittenCount = 0;
         
         for (Map<String, Object> recommendation : recommendationResults) {
-            try {
-                String recommendationStatus = (String) recommendation.get("status");
-                
-                // Only write stocks with "Recommended" status
-                if (!"Recommended".equals(recommendationStatus)) {
-                    continue;
+            if (shouldWriteRecommendation(recommendation)) {
+                try {
+                    Map<String, AttributeValue> dynamoDbItem = buildDynamoDbItem(recommendation, scanDate);
+                    writeItemToDynamoDb(dynamoDbItem);
+                    successfullyWrittenCount++;
+                } catch (Exception e) {
+                    context.getLogger().log("Error writing result to FilteredTickersTable: " + e.getMessage());
                 }
-                
-                String tickerSymbol = (String) recommendation.get("ticker");
-                Integer recommendationScore = (Integer) recommendation.get("recommendationScore");
-                Double avgVolume = (Double) recommendation.get("avgVolume");
-                String earningsDate = (String) recommendation.get("earningsDate");
-                
-                // Build DynamoDB item
-                Map<String, AttributeValue> dynamoDbItem = new HashMap<>();
-                dynamoDbItem.put("ticker", AttributeValue.builder().s(tickerSymbol).build());
-                dynamoDbItem.put("scanDate", AttributeValue.builder().s(scanDate).build());
-                dynamoDbItem.put("recommendationScore", AttributeValue.builder().n(String.valueOf(recommendationScore)).build());
-                dynamoDbItem.put("status", AttributeValue.builder().s(recommendationStatus).build());
-                dynamoDbItem.put("avgVolume", AttributeValue.builder().n(String.valueOf(avgVolume)).build());
-                dynamoDbItem.put("earningsDate", AttributeValue.builder().s(earningsDate).build());
-                
-                // Add filter results
-                for (String key : recommendation.keySet()) {
-                    if (key.endsWith("Score") || key.endsWith("Passed")) {
-                        Object value = recommendation.get(key);
-                        if (value instanceof Integer) {
-                            dynamoDbItem.put(key, AttributeValue.builder().n(String.valueOf(value)).build());
-                        } else if (value instanceof Boolean) {
-                            dynamoDbItem.put(key, AttributeValue.builder().bool((Boolean) value).build());
-                        }
-                    }
-                }
-                
-                // Write to DynamoDB
-                DynamoDbClient dynamoDbClient = DynamoDbClient.create();
-                PutItemRequest putItemRequest = PutItemRequest.builder()
-                    .tableName(FILTERED_TABLE)
-                    .item(dynamoDbItem)
-                    .build();
-                
-                dynamoDbClient.putItem(putItemRequest);
-                successfullyWrittenCount++;
-                
-            } catch (Exception e) {
-                context.getLogger().log("Error writing result to FilteredTickersTable: " + e.getMessage());
             }
         }
         
@@ -315,69 +440,796 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
     }
     
     /**
-     * Get real stock data with simplified calculations
+     * Check if recommendation should be written to database
      */
-    private StockData getRealStockData(String ticker, Context context) {
+    private boolean shouldWriteRecommendation(Map<String, Object> recommendation) {
+        String recommendationStatus = (String) recommendation.get("status");
+        return "Recommended".equals(recommendationStatus);
+    }
+    
+    /**
+     * Build DynamoDB item from recommendation data
+     */
+    private Map<String, AttributeValue> buildDynamoDbItem(Map<String, Object> recommendation, String scanDate) {
+        Map<String, AttributeValue> dynamoDbItem = new HashMap<>();
+        
+        // Add basic fields
+        addBasicFieldsToDynamoDbItem(dynamoDbItem, recommendation, scanDate);
+        
+        // Add filter results
+        addFilterResultsToDynamoDbItem(dynamoDbItem, recommendation);
+        
+        return dynamoDbItem;
+    }
+    
+    /**
+     * Add basic fields to DynamoDB item
+     */
+    private void addBasicFieldsToDynamoDbItem(Map<String, AttributeValue> dynamoDbItem, Map<String, Object> recommendation, String scanDate) {
+        String tickerSymbol = (String) recommendation.get("ticker");
+        String recommendationStatus = (String) recommendation.get("status");
+        Double avgVolume = (Double) recommendation.get("avgVolume");
+        String earningsDate = (String) recommendation.get("earningsDate");
+        Double positionSizePercentage = (Double) recommendation.get("positionSizePercentage");
+        
+        dynamoDbItem.put("ticker", AttributeValue.builder().s(tickerSymbol).build());
+        dynamoDbItem.put("scanDate", AttributeValue.builder().s(scanDate).build());
+        dynamoDbItem.put("status", AttributeValue.builder().s(recommendationStatus).build());
+        dynamoDbItem.put("avgVolume", AttributeValue.builder().n(String.valueOf(avgVolume)).build());
+        dynamoDbItem.put("earningsDate", AttributeValue.builder().s(earningsDate).build());
+        
+        // Add position sizing data
+        if (positionSizePercentage != null) {
+            dynamoDbItem.put("positionSizePercentage", AttributeValue.builder().n(String.valueOf(positionSizePercentage)).build());
+        }
+    }
+                
+    /**
+     * Add filter results to DynamoDB item
+     */
+    private void addFilterResultsToDynamoDbItem(Map<String, AttributeValue> dynamoDbItem, Map<String, Object> recommendation) {
+        for (String key : recommendation.keySet()) {
+            if (key.endsWith("Passed")) {
+                Object value = recommendation.get(key);
+                if (value instanceof Boolean) {
+                    dynamoDbItem.put(key, AttributeValue.builder().bool((Boolean) value).build());
+                }
+            }
+        }
+    }
+    
+    /**
+     * Write item to DynamoDB
+     */
+    private void writeItemToDynamoDb(Map<String, AttributeValue> dynamoDbItem) {
+                PutItemRequest putItemRequest = PutItemRequest.builder()
+                    .tableName(FILTERED_TABLE)
+                    .item(dynamoDbItem)
+                    .build();
+                
+                dynamoDbClient.putItem(putItemRequest);
+    }
+    
+    
+    /**
+     * Evaluate liquidity filter with cached option data
+     */
+    private FilterResult evaluateLiquidityFilterWithCachedData(String ticker, double avgVolume, 
+            Map<String, com.trading.common.models.OptionSnapshot> shortChain, 
+            Map<String, com.trading.common.models.OptionSnapshot> longChain, Context context) {
+        // Check volume threshold first
+        boolean volumePassed = avgVolume >= VOLUME_THRESHOLD;
+        
+        // Check options liquidity using cached data
+        boolean optionsLiquidityPassed = false;
+        if (!shortChain.isEmpty() && !longChain.isEmpty()) {
+            // Use cached data to check options liquidity
+            optionsLiquidityPassed = hasOptionsLiquidityWithCachedData(ticker, shortChain, longChain, context);
+        }
+        
+        int score = optionsLiquidityPassed ? 2 : (volumePassed ? 1 : 0);
+        context.getLogger().log(ticker + " Liquidity filter: volume=" + volumePassed + 
+            ", options=" + optionsLiquidityPassed + " (score: " + score + ")");
+        return new FilterResult("Liquidity", score > 0, score);
+    }
+    
+    /**
+     * Check options liquidity using cached option data
+     */
+    private boolean hasOptionsLiquidityWithCachedData(String ticker, 
+            Map<String, com.trading.common.models.OptionSnapshot> shortChain, 
+            Map<String, com.trading.common.models.OptionSnapshot> longChain, Context context) {
         try {
-            // Get latest trade for current price and volume
-            AlpacaApiService.LatestTrade latestTrade = alpacaApiService.getLatestTrade(ticker);
-            if (latestTrade == null) {
-                context.getLogger().log("No trade data available for: " + ticker);
-                return null;
+            // Check if we have sufficient option contracts
+            if (shortChain.size() < 3 || longChain.size() < 3) {
+                context.getLogger().log("Insufficient option contracts for " + ticker);
+                return false;
             }
             
-            // Get historical data for calculations
-            List<AlpacaApiService.HistoricalBar> historicalBars = alpacaApiService.getHistoricalBars(ticker, 90);
-            if (historicalBars == null || historicalBars.isEmpty()) {
-                context.getLogger().log("No historical data available for: " + ticker);
-                return null;
+            // Check for tight spreads in short-term options
+            boolean hasTightSpreads = shortChain.values().stream()
+                .anyMatch(option -> {
+                    double bid = option.getBid();
+                    double ask = option.getAsk();
+                    return bid > 0 && ask > 0 && (ask - bid) / ask < 0.1; // 10% spread threshold
+                });
+            
+            // Check for reasonable volume in options (using bid/ask size as proxy for volume)
+            boolean hasVolume = shortChain.values().stream()
+                .anyMatch(option -> option.getTotalSize() > 10);
+            
+            return hasTightSpreads && hasVolume;
+        } catch (Exception e) {
+            context.getLogger().log("Error checking options liquidity for " + ticker + ": " + e.getMessage());
+            return false;
+        }
+    }
+    
+    /**
+     * Evaluate IV ratio filter with cached option data
+     */
+    private FilterResult evaluateIVRatioFilterWithCachedData(String ticker, LocalDate earningsDate,
+            Map<String, com.trading.common.models.OptionSnapshot> shortChain, 
+            Map<String, com.trading.common.models.OptionSnapshot> longChain, Context context) {
+        try {
+            if (shortChain.isEmpty() || longChain.isEmpty()) {
+                context.getLogger().log("No option data available for IV ratio check for " + ticker);
+                return evaluateFilter("IV_Ratio", false, 2, context, ticker);
             }
             
-            // Sort historical bars by timestamp to ensure chronological order
-            historicalBars.sort((a, b) -> a.getTimestamp().compareTo(b.getTimestamp()));
+            // Get current stock price from cached stock data
+            StockData stockData = cacheManager.getCachedStockData(ticker, context);
+            if (stockData == null || stockData.getCurrentPrice() <= 0) {
+                context.getLogger().log("Invalid stock price for IV ratio check for " + ticker);
+                return evaluateFilter("IV_Ratio", false, 2, context, ticker);
+            }
+            double currentPrice = stockData.getCurrentPrice();
             
-            // Calculate average volume from historical data
-            double averageVolume = commonUtils.calculateAverageVolume(historicalBars);
+            // Find best common strike for calendar spread
+            double bestStrike = OptionSelectionUtils.findBestCommonStrikeForCalendarSpreadFromOptionSnapshots(
+                shortChain, longChain, currentPrice);
             
-            // Calculate RV30 (realized volatility)
-            double rv30 = commonUtils.calculateRV30(historicalBars, context);
+            if (bestStrike < 0) {
+                context.getLogger().log("No common strikes found for calendar spread for " + ticker);
+                return evaluateFilter("IV_Ratio", false, 2, context, ticker);
+            }
             
-            // Calculate IV30 (implied volatility - using HV as proxy)
-            double iv30 = commonUtils.calculateIV30(historicalBars, context);
+            // Calculate IV ratio using cached data
+            double ivRatio = calculateIVRatioWithCachedData(shortChain, longChain, bestStrike, context);
+            boolean passed = ivRatio > IV_RATIO_THRESHOLD; // Use configurable threshold
             
-            // Calculate term structure slope
-            double termSlope = commonUtils.calculateTermStructureSlope(historicalBars, context);
-            
-            return new StockData(ticker, averageVolume, rv30, iv30, termSlope);
+            context.getLogger().log(ticker + " IV ratio: " + String.format("%.2f", ivRatio) + 
+                " (passed: " + passed + ")");
+            return evaluateFilter("IV_Ratio", passed, 2, context, ticker);
             
         } catch (Exception e) {
-            context.getLogger().log("Error getting real stock data for " + ticker + ": " + e.getMessage());
+            context.getLogger().log("Error in IV ratio filter for " + ticker + ": " + e.getMessage());
+            return evaluateFilter("IV_Ratio", false, 2, context, ticker);
+        }
+    }
+    
+    /**
+     * Calculate IV ratio using cached option data
+     */
+    private double calculateIVRatioWithCachedData(Map<String, com.trading.common.models.OptionSnapshot> shortChain,
+            Map<String, com.trading.common.models.OptionSnapshot> longChain, double strike, Context context) {
+        try {
+            // Find options at the strike price
+            com.trading.common.models.OptionSnapshot shortOption = shortChain.values().stream()
+                .filter(opt -> Math.abs(opt.getStrike() - strike) < 0.01)
+                .findFirst().orElse(null);
+                
+            com.trading.common.models.OptionSnapshot longOption = longChain.values().stream()
+                .filter(opt -> Math.abs(opt.getStrike() - strike) < 0.01)
+                .findFirst().orElse(null);
+            
+            if (shortOption == null || longOption == null) {
+                return 0.0;
+            }
+            
+            double shortIV = shortOption.getImpliedVol();
+            double longIV = longOption.getImpliedVol();
+            
+            if (shortIV <= 0 || longIV <= 0) {
+                return 0.0;
+            }
+            
+            return shortIV / longIV;
+        } catch (Exception e) {
+            context.getLogger().log("Error calculating IV ratio: " + e.getMessage());
+            return 0.0;
+        }
+    }
+    
+    /**
+     * Evaluate term structure filter with cached option data
+     */
+    private FilterResult evaluateTermStructureFilterWithCachedData(String ticker, LocalDate earningsDate,
+            Map<String, com.trading.common.models.OptionSnapshot> shortChain, 
+            Map<String, com.trading.common.models.OptionSnapshot> longChain, Context context) {
+        try {
+            if (shortChain.isEmpty() || longChain.isEmpty()) {
+                context.getLogger().log("No option data available for term structure check for " + ticker);
+                return evaluateFilter("Term_Structure", false, 1, context, ticker);
+            }
+            
+            // Get current stock price from cached stock data
+            StockData stockData = cacheManager.getCachedStockData(ticker, context);
+            if (stockData == null || stockData.getCurrentPrice() <= 0) {
+                context.getLogger().log("Invalid stock price for term structure check for " + ticker);
+                return evaluateFilter("Term_Structure", false, 1, context, ticker);
+            }
+            double currentPrice = stockData.getCurrentPrice();
+            
+            // Find best common strike for calendar spread
+            double bestStrike = OptionSelectionUtils.findBestCommonStrikeForCalendarSpreadFromOptionSnapshots(
+                shortChain, longChain, currentPrice);
+            
+            if (bestStrike < 0) {
+                context.getLogger().log("No common strikes found for term structure check for " + ticker);
+                return evaluateFilter("Term_Structure", false, 1, context, ticker);
+            }
+            
+            // Calculate term structure using cached data
+            boolean hasBackwardation = calculateTermStructureWithCachedData(shortChain, longChain, bestStrike, context);
+            
+            context.getLogger().log(ticker + " Term structure backwardation: " + hasBackwardation);
+            return evaluateFilter("Term_Structure", hasBackwardation, 1, context, ticker);
+            
+        } catch (Exception e) {
+            context.getLogger().log("Error in term structure filter for " + ticker + ": " + e.getMessage());
+            return evaluateFilter("Term_Structure", false, 1, context, ticker);
+        }
+    }
+    
+    /**
+     * Calculate term structure backwardation using cached option data
+     */
+    private boolean calculateTermStructureWithCachedData(Map<String, com.trading.common.models.OptionSnapshot> shortChain,
+            Map<String, com.trading.common.models.OptionSnapshot> longChain, double strike, Context context) {
+        try {
+            // Find options at the strike price
+            com.trading.common.models.OptionSnapshot shortOption = shortChain.values().stream()
+                .filter(opt -> Math.abs(opt.getStrike() - strike) < 0.01)
+                .findFirst().orElse(null);
+                
+            com.trading.common.models.OptionSnapshot longOption = longChain.values().stream()
+                .filter(opt -> Math.abs(opt.getStrike() - strike) < 0.01)
+                .findFirst().orElse(null);
+            
+            if (shortOption == null || longOption == null) {
+                return false;
+            }
+            
+            double shortIV = shortOption.getImpliedVol();
+            double longIV = longOption.getImpliedVol();
+            
+            if (shortIV <= 0 || longIV <= 0) {
+                return false;
+            }
+            
+            // Backwardation: short-term IV > long-term IV
+            return shortIV > longIV;
+        } catch (Exception e) {
+            context.getLogger().log("Error calculating term structure: " + e.getMessage());
+            return false;
+        }
+    }
+    
+    /**
+     * Evaluate earnings stability filter with cached historical data
+     */
+    private FilterResult evaluateEarningsStabilityFilterWithCachedData(String ticker, LocalDate earningsDate,
+            Map<String, com.trading.common.models.OptionSnapshot> shortCallChain, 
+            Map<String, com.trading.common.models.OptionSnapshot> shortPutChain, Context context) {
+        try {
+            // Get cached historical data
+            List<HistoricalBar> historicalBars = cacheManager.getCachedHistoricalData(ticker, context);
+            if (historicalBars == null || historicalBars.isEmpty()) {
+                context.getLogger().log("No historical data available for earnings stability check for " + ticker);
+                return evaluateFilter("Earnings_Stability", false, 1, context, ticker);
+            }
+            
+            // Calculate earnings stability using cached data
+            boolean hasEarningsStability = calculateEarningsStabilityWithCachedData(ticker, earningsDate, historicalBars, shortCallChain, shortPutChain, context);
+            
+            context.getLogger().log(ticker + " Earnings stability: " + hasEarningsStability);
+            return evaluateFilter("Earnings_Stability", hasEarningsStability, 1, context, ticker);
+            
+        } catch (Exception e) {
+            context.getLogger().log("Error in earnings stability filter for " + ticker + ": " + e.getMessage());
+            return evaluateFilter("Earnings_Stability", false, 1, context, ticker);
+        }
+    }
+    
+    /**
+     * Calculate earnings stability using cached historical data
+     */
+    private boolean calculateEarningsStabilityWithCachedData(String ticker, LocalDate earningsDate, 
+            List<HistoricalBar> historicalBars, Map<String, com.trading.common.models.OptionSnapshot> shortCallChain,
+            Map<String, com.trading.common.models.OptionSnapshot> shortPutChain, Context context) {
+        try {
+            // Get historical earnings data
+            List<StockFilterCommonUtils.EarningsData> earningsData = commonUtils.getHistoricalEarningsData(ticker, context);
+            if (earningsData.isEmpty()) {
+                context.getLogger().log("No historical earnings data for " + ticker);
+                return false;
+            }
+            
+            // Calculate average historical move using cached data
+            double averageHistoricalMove = calculateAverageHistoricalMoveWithCachedData(ticker, earningsData, historicalBars, context);
+            if (averageHistoricalMove < 0) {
+                context.getLogger().log("Could not calculate average historical move for " + ticker);
+                return false;
+            }
+            
+            // Check historical stability using cached data
+            boolean historicalStable = checkHistoricalStabilityWithCachedData(ticker, earningsData, historicalBars, context);
+            
+            // Try to get current straddle-implied move (this still needs option data)
+            double currentStraddleMove = getCurrentStraddleImpliedMoveWithCachedData(ticker, earningsDate, shortCallChain, shortPutChain, context);
+            
+            boolean straddleOverpriced = false;
+            boolean usedStraddleData = false;
+            
+            if (currentStraddleMove > 0) {
+                straddleOverpriced = currentStraddleMove > averageHistoricalMove * 1.2; // 20% over historical
+                usedStraddleData = true;
+                context.getLogger().log(ticker + " straddle analysis: current=" + String.format("%.2f%%", currentStraddleMove * 100) + 
+                    ", historical=" + String.format("%.2f%%", averageHistoricalMove * 100) + 
+                    ", overpriced=" + straddleOverpriced);
+            }
+            
+            // Determine if earnings are stable
+            boolean isStable = historicalStable && (!usedStraddleData || straddleOverpriced);
+            
+            context.getLogger().log(ticker + " earnings stability: historical=" + historicalStable + 
+                ", straddle_overpriced=" + straddleOverpriced + ", stable=" + isStable);
+            
+            return isStable;
+            
+        } catch (Exception e) {
+            context.getLogger().log("Error calculating earnings stability for " + ticker + ": " + e.getMessage());
+            return false;
+        }
+    }
+    
+    /**
+     * Calculate average historical move using cached historical data
+     */
+    private double calculateAverageHistoricalMoveWithCachedData(String ticker, List<StockFilterCommonUtils.EarningsData> earningsData, 
+            List<HistoricalBar> historicalBars, Context context) {
+        double totalWeightedMove = 0.0;
+        double totalWeight = 0.0;
+        int validMoves = 0;
+        
+        LocalDate cutoffDate = LocalDate.now(ZoneId.of("America/New_York")).minusYears(2);
+        
+        for (StockFilterCommonUtils.EarningsData earning : earningsData) {
+            try {
+                // Use cached data to calculate earnings day move
+                double actualMove = calculateEarningsDayMoveWithCachedData(ticker, earning.getEarningsDate(), historicalBars, context);
+                if (actualMove >= 0) {
+                    validMoves++;
+                    
+                    // Calculate weight based on recency
+                    double weight = commonUtils.calculateRecencyWeight(earning.getEarningsDate(), cutoffDate);
+                    totalWeightedMove += actualMove * weight;
+                    totalWeight += weight;
+                }
+            } catch (Exception e) {
+                context.getLogger().log("Error calculating move for " + ticker + " on " + earning.getEarningsDate() + ": " + e.getMessage());
+            }
+        }
+        
+        if (validMoves == 0 || totalWeight == 0) {
+            return -1.0;
+        }
+        
+        double averageMove = totalWeightedMove / totalWeight;
+        context.getLogger().log(ticker + " average historical move: " + String.format("%.2f%%", averageMove * 100) + 
+            " (from " + validMoves + " earnings)");
+        return averageMove;
+    }
+    
+    /**
+     * Calculate earnings day move using cached historical data
+     */
+    private double calculateEarningsDayMoveWithCachedData(String ticker, LocalDate earningsDate, 
+            List<HistoricalBar> historicalBars, Context context) {
+        try {
+            // Find the earnings day bar
+            HistoricalBar earningsBar = getHistoricalBarForDateFromCachedData(earningsDate, historicalBars, false, context);
+            if (earningsBar == null) {
+                return -1.0;
+            }
+            
+            // Find the previous trading day's bar
+            HistoricalBar previousBar = getHistoricalBarForDateFromCachedData(earningsDate, historicalBars, true, context);
+            if (previousBar == null) {
+                // Fallback to regular open-to-close calculation
+                double openPrice = earningsBar.getOpen();
+                double closePrice = earningsBar.getClose();
+                if (openPrice <= 0) return -1.0;
+                return Math.abs(closePrice - openPrice) / openPrice;
+            }
+            
+            // Calculate move including overnight gap
+            double previousClose = previousBar.getClose();
+            double earningsOpen = earningsBar.getOpen();
+            double earningsClose = earningsBar.getClose();
+            
+            if (previousClose <= 0 || earningsOpen <= 0) {
+                return -1.0;
+            }
+            
+            // Total move from previous close to earnings close
+            double totalMove = Math.abs(earningsClose - previousClose) / previousClose;
+            
+            context.getLogger().log(ticker + " earnings move on " + earningsDate + ": " + 
+                String.format("%.2f%%", totalMove * 100));
+            
+            return totalMove;
+            
+        } catch (Exception e) {
+            context.getLogger().log("Error calculating earnings day move for " + ticker + " on " + earningsDate + ": " + e.getMessage());
+            return -1.0;
+        }
+    }
+    
+    /**
+     * Get historical bar for a specific date from cached data
+     */
+    private HistoricalBar getHistoricalBarForDateFromCachedData(LocalDate targetDate, List<HistoricalBar> historicalBars, 
+            boolean getPrevious, Context context) {
+        try {
+            if (getPrevious) {
+                // Find the previous trading day's bar
+                return historicalBars.stream()
+                    .filter(bar -> {
+                        try {
+                            LocalDate barDate = LocalDate.parse(bar.getTimestamp().substring(0, 10));
+                            return barDate.isBefore(targetDate);
+                        } catch (Exception e) {
+                            return false;
+                        }
+                    })
+                    .max((a, b) -> a.getTimestamp().compareTo(b.getTimestamp()))
+                    .orElse(null);
+            } else {
+                // Find the exact date bar
+                return historicalBars.stream()
+                    .filter(bar -> {
+                        try {
+                            LocalDate barDate = LocalDate.parse(bar.getTimestamp().substring(0, 10));
+                            return barDate.equals(targetDate);
+                        } catch (Exception e) {
+                            return false;
+                        }
+                    })
+                    .findFirst()
+                    .orElse(null);
+            }
+        } catch (Exception e) {
+            context.getLogger().log("Error finding historical bar for " + targetDate + ": " + e.getMessage());
             return null;
         }
     }
     
     /**
-     * Data class for stock information
+     * Check historical stability using cached data
      */
-    private static class StockData {
-        private final String ticker;
-        private final double averageVolume;
-        private final double rv30;
-        private final double iv30;
-        private final double termStructureSlope;
-        
-        public StockData(String ticker, double averageVolume, double rv30, double iv30, double termStructureSlope) {
-            this.ticker = ticker;
-            this.averageVolume = averageVolume;
-            this.rv30 = rv30;
-            this.iv30 = iv30;
-            this.termStructureSlope = termStructureSlope;
+    private boolean checkHistoricalStabilityWithCachedData(String ticker, List<StockFilterCommonUtils.EarningsData> earningsData, 
+            List<HistoricalBar> historicalBars, Context context) {
+        try {
+            int stableCount = 0;
+            int totalEarnings = 0;
+            
+            for (StockFilterCommonUtils.EarningsData earning : earningsData) {
+                try {
+                    double move = calculateEarningsDayMoveWithCachedData(ticker, earning.getEarningsDate(), historicalBars, context);
+                    if (move >= 0) {
+                        totalEarnings++;
+                        if (move < 0.05) { // Less than 5% move
+                            stableCount++;
+                        }
+                    }
+                } catch (Exception e) {
+                    context.getLogger().log("Error checking stability for " + ticker + " on " + earning.getEarningsDate() + ": " + e.getMessage());
+                }
+            }
+            
+            if (totalEarnings == 0) {
+                return false;
+            }
+            
+            double stabilityRatio = (double) stableCount / totalEarnings;
+            boolean isStable = stabilityRatio >= 0.6; // 60% of earnings were stable
+            
+            context.getLogger().log(ticker + " historical stability: " + stableCount + "/" + totalEarnings + 
+                " = " + String.format("%.1f%%", stabilityRatio * 100) + " (stable: " + isStable + ")");
+            
+            return isStable;
+            
+        } catch (Exception e) {
+            context.getLogger().log("Error checking historical stability for " + ticker + ": " + e.getMessage());
+            return false;
         }
-        
-        public String getTicker() { return ticker; }
-        public double getAverageVolume() { return averageVolume; }
-        public double getRv30() { return rv30; }
-        public double getIv30() { return iv30; }
-        public double getTermStructureSlope() { return termStructureSlope; }
     }
+    
+    /**
+     * Get current straddle-implied move using cached option data
+     */
+    private double getCurrentStraddleImpliedMoveWithCachedData(String ticker, LocalDate earningsDate,
+            Map<String, com.trading.common.models.OptionSnapshot> shortCallChain, 
+            Map<String, com.trading.common.models.OptionSnapshot> shortPutChain, Context context) {
+        try {
+            if (shortCallChain.isEmpty() || shortPutChain.isEmpty()) {
+                return -1.0;
+            }
+            
+            // Get current stock price from cached stock data
+            StockData stockData = cacheManager.getCachedStockData(ticker, context);
+            if (stockData == null || stockData.getCurrentPrice() <= 0) {
+                return -1.0;
+            }
+            double currentPrice = stockData.getCurrentPrice();
+            
+            // Find ATM options
+            com.trading.common.models.OptionSnapshot atmCall = shortCallChain.values().stream()
+                .filter(opt -> Math.abs(opt.getStrike() - currentPrice) / currentPrice < 0.05)
+                .min((a, b) -> Double.compare(Math.abs(a.getStrike() - currentPrice), Math.abs(b.getStrike() - currentPrice)))
+                .orElse(null);
+                
+            com.trading.common.models.OptionSnapshot atmPut = shortPutChain.values().stream()
+                .filter(opt -> Math.abs(opt.getStrike() - currentPrice) / currentPrice < 0.05)
+                .min((a, b) -> Double.compare(Math.abs(a.getStrike() - currentPrice), Math.abs(b.getStrike() - currentPrice)))
+                .orElse(null);
+            
+            if (atmCall == null || atmPut == null) {
+                return -1.0;
+            }
+            
+            // Calculate straddle price
+            double callPrice = (atmCall.getBid() + atmCall.getAsk()) / 2.0;
+            double putPrice = (atmPut.getBid() + atmPut.getAsk()) / 2.0;
+            double straddlePrice = callPrice + putPrice;
+            
+            if (straddlePrice <= 0 || currentPrice <= 0) {
+                return -1.0;
+            }
+            
+            // Convert to percentage move
+            double impliedMove = straddlePrice / currentPrice;
+            
+            context.getLogger().log(ticker + " straddle implied move: " + String.format("%.2f%%", impliedMove * 100));
+            
+            return impliedMove;
+            
+        } catch (Exception e) {
+            context.getLogger().log("Error calculating straddle implied move for " + ticker + ": " + e.getMessage());
+            return -1.0;
+        }
+    }
+    
+    /**
+     * Evaluate volatility crush filter with cached historical data
+     */
+    private FilterResult evaluateVolatilityCrushFilterWithCachedData(String ticker, Context context) {
+        try {
+            // Get cached historical data
+            List<HistoricalBar> historicalBars = cacheManager.getCachedHistoricalData(ticker, context);
+            if (historicalBars == null || historicalBars.isEmpty()) {
+                context.getLogger().log("No historical data available for volatility crush check for " + ticker);
+                return evaluateFilter("Stock_Vol_Crush", false, 1, context, ticker);
+            }
+            
+            // Calculate volatility crush using cached data
+            boolean hasVolatilityCrush = calculateVolatilityCrushWithCachedData(ticker, historicalBars, context);
+            
+            context.getLogger().log(ticker + " Volatility crush: " + hasVolatilityCrush);
+            return evaluateFilter("Stock_Vol_Crush", hasVolatilityCrush, 1, context, ticker);
+            
+        } catch (Exception e) {
+            context.getLogger().log("Error in volatility crush filter for " + ticker + ": " + e.getMessage());
+            return evaluateFilter("Stock_Vol_Crush", false, 1, context, ticker);
+        }
+    }
+    
+    /**
+     * Calculate volatility crush using cached historical data
+     */
+    private boolean calculateVolatilityCrushWithCachedData(String ticker, List<HistoricalBar> historicalBars, Context context) {
+        try {
+            // Get historical earnings data
+            List<StockFilterCommonUtils.EarningsData> earningsData = commonUtils.getHistoricalEarningsData(ticker, context);
+            if (earningsData.isEmpty()) {
+                context.getLogger().log("No historical earnings data for " + ticker);
+                return false;
+            }
+            
+            int crushCount = 0;
+            int totalEarnings = 0;
+            
+            for (StockFilterCommonUtils.EarningsData earning : earningsData) {
+                try {
+                    LocalDate earningsDate = earning.getEarningsDate();
+                    
+                    if (calculateVolatilityCrushForEarningsWithCachedData(ticker, earningsDate, historicalBars, context)) {
+                        crushCount++;
+                    }
+                    totalEarnings++;
+                } catch (Exception e) {
+                    context.getLogger().log("Error calculating volatility crush for " + ticker + " on " + earning.getEarningsDate() + ": " + e.getMessage());
+                }
+            }
+            
+            boolean hasCrush = totalEarnings > 0 && (double) crushCount / totalEarnings >= 0.5; // 50% threshold
+            context.getLogger().log(ticker + " stock volatility crush: " + crushCount + "/" + totalEarnings + 
+                " = " + String.format("%.1f%%", (double) crushCount / totalEarnings * 100) + " (" + hasCrush + ")");
+            return hasCrush;
+            
+        } catch (Exception e) {
+            context.getLogger().log("Error calculating volatility crush for " + ticker + ": " + e.getMessage());
+            return false;
+        }
+    }
+    
+    /**
+     * Calculate volatility crush for specific earnings using cached historical data
+     */
+    private boolean calculateVolatilityCrushForEarningsWithCachedData(String ticker, LocalDate earningsDate, 
+            List<HistoricalBar> historicalBars, Context context) {
+        try {
+            // Calculate pre-earnings volatility (7 days before earnings)
+            double preVol = calculateVolatilityForPeriod(historicalBars, earningsDate.minusDays(7), earningsDate.minusDays(1), context);
+            
+            // Calculate post-earnings volatility (7 days after earnings)
+            double postVol = calculateVolatilityForPeriod(historicalBars, earningsDate.plusDays(1), earningsDate.plusDays(7), context);
+            
+            if (preVol > 0 && postVol > 0) {
+                double crushRatio = postVol / preVol;
+                boolean hasCrush = crushRatio < 0.8; // 20% or more reduction
+                context.getLogger().log(ticker + " volatility crush on " + earningsDate + ": " + 
+                    String.format("%.3f", preVol) + " -> " + String.format("%.3f", postVol) + 
+                    " (ratio: " + String.format("%.2f", crushRatio) + ", crush: " + hasCrush + ")");
+                return hasCrush;
+            }
+            
+            return false;
+        } catch (Exception e) {
+            context.getLogger().log("Error calculating volatility crush for " + ticker + " on " + earningsDate + ": " + e.getMessage());
+            return false;
+        }
+    }
+    
+    /**
+     * Calculate volatility for a specific period using cached historical data
+     */
+    private double calculateVolatilityForPeriod(List<HistoricalBar> historicalBars, LocalDate startDate, LocalDate endDate, Context context) {
+        try {
+            // Filter bars for the specific period
+            List<HistoricalBar> periodBars = historicalBars.stream()
+                .filter(bar -> {
+                    try {
+                        LocalDate barDate = LocalDate.parse(bar.getTimestamp().substring(0, 10)); // Extract date part
+                        return !barDate.isBefore(startDate) && !barDate.isAfter(endDate);
+                    } catch (Exception e) {
+                        return false;
+                    }
+                })
+                .collect(Collectors.toList());
+            
+            if (periodBars.size() < 2) {
+                return 0.0;
+            }
+            
+            // Calculate daily returns
+            List<Double> returns = new ArrayList<>();
+            for (int i = 1; i < periodBars.size(); i++) {
+                double prevClose = periodBars.get(i - 1).getClose();
+                double currentClose = periodBars.get(i).getClose();
+                if (prevClose > 0) {
+                    returns.add(Math.log(currentClose / prevClose));
+                }
+            }
+            
+            if (returns.isEmpty()) {
+                return 0.0;
+            }
+            
+            // Calculate standard deviation (volatility)
+            double mean = returns.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
+            double variance = returns.stream()
+                .mapToDouble(r -> Math.pow(r - mean, 2))
+                .average()
+                .orElse(0.0);
+            
+            return Math.sqrt(variance * 252); // Annualized volatility
+        } catch (Exception e) {
+            context.getLogger().log("Error calculating volatility for period: " + e.getMessage());
+            return 0.0;
+        }
+    }
+    
+    /**
+     * Evaluate execution spread filter with cached option data
+     */
+    private FilterResult evaluateExecutionSpreadFilterWithCachedData(String ticker, LocalDate earningsDate,
+            Map<String, com.trading.common.models.OptionSnapshot> shortCallChain, 
+            Map<String, com.trading.common.models.OptionSnapshot> shortPutChain, Context context) {
+        try {
+            if (shortCallChain.isEmpty() || shortPutChain.isEmpty()) {
+                context.getLogger().log("No option data available for execution spread check for " + ticker);
+                return evaluateFilter("Execution_Spread", false, 3, context, ticker);
+            }
+            
+            // Get current stock price from cached stock data
+            StockData stockData = cacheManager.getCachedStockData(ticker, context);
+            if (stockData == null || stockData.getCurrentPrice() <= 0) {
+                context.getLogger().log("Invalid stock price for execution spread check for " + ticker);
+                return evaluateFilter("Execution_Spread", false, 3, context, ticker);
+            }
+            double currentPrice = stockData.getCurrentPrice();
+            
+            // Calculate execution spread feasibility using cached data
+            boolean hasFeasibleSpreads = calculateExecutionSpreadWithCachedData(ticker, currentPrice, 
+                shortCallChain, shortPutChain, context);
+            
+            context.getLogger().log(ticker + " Execution spread feasibility: " + hasFeasibleSpreads);
+            return evaluateFilter("Execution_Spread", hasFeasibleSpreads, 3, context, ticker);
+            
+        } catch (Exception e) {
+            context.getLogger().log("Error in execution spread filter for " + ticker + ": " + e.getMessage());
+            return evaluateFilter("Execution_Spread", false, 3, context, ticker);
+        }
+    }
+    
+    /**
+     * Calculate execution spread feasibility using cached option data
+     */
+    private boolean calculateExecutionSpreadWithCachedData(String ticker, double currentPrice,
+            Map<String, com.trading.common.models.OptionSnapshot> shortCallChain, 
+            Map<String, com.trading.common.models.OptionSnapshot> shortPutChain, Context context) {
+        try {
+            // Find ATM options for both calls and puts
+            com.trading.common.models.OptionSnapshot atmCall = shortCallChain.values().stream()
+                .filter(opt -> Math.abs(opt.getStrike() - currentPrice) / currentPrice < 0.05) // Within 5% of ATM
+                .min((a, b) -> Double.compare(Math.abs(a.getStrike() - currentPrice), Math.abs(b.getStrike() - currentPrice)))
+                .orElse(null);
+                
+            com.trading.common.models.OptionSnapshot atmPut = shortPutChain.values().stream()
+                .filter(opt -> Math.abs(opt.getStrike() - currentPrice) / currentPrice < 0.05) // Within 5% of ATM
+                .min((a, b) -> Double.compare(Math.abs(a.getStrike() - currentPrice), Math.abs(b.getStrike() - currentPrice)))
+                .orElse(null);
+            
+            if (atmCall == null || atmPut == null) {
+                context.getLogger().log("No ATM options found for execution spread check for " + ticker);
+                return false;
+            }
+            
+            // Check if spreads are tight enough for execution
+            double callSpread = atmCall.getBidAskSpreadPercent();
+            double putSpread = atmPut.getBidAskSpreadPercent();
+            
+            // Require both spreads to be reasonable (less than 15%)
+            boolean hasTightSpreads = callSpread < 0.15 && putSpread < 0.15;
+            
+            // Check if there's reasonable liquidity (bid/ask sizes)
+            boolean hasLiquidity = atmCall.getTotalSize() > 5 && atmPut.getTotalSize() > 5;
+            
+            context.getLogger().log(ticker + " Call spread: " + String.format("%.1f%%", callSpread * 100) + 
+                ", Put spread: " + String.format("%.1f%%", putSpread * 100) + 
+                ", Liquidity: " + hasLiquidity);
+            
+            return hasTightSpreads && hasLiquidity;
+        } catch (Exception e) {
+            context.getLogger().log("Error calculating execution spread: " + e.getMessage());
+            return false;
+        }
+    }
+    
+    
+    
+    
 }

@@ -10,7 +10,7 @@ Globals:
     Environment:
       Variables:
         FINNHUB_API_URL: https://finnhub.io/api/v1/calendar/earnings
-        FINNHUB_SECRET_NAME: finnhub-api-key
+        FINNHUB_SECRET_NAME: trading/finnhub/credentials
         DYNAMODB_TABLE: !Ref EarningsTable
 
 Parameters:

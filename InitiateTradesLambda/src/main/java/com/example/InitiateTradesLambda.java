@@ -4,7 +4,13 @@ import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.trading.common.TradingCommonUtils;
+import com.trading.common.JsonUtils;
 import com.trading.common.TradingErrorHandler;
+import com.trading.common.OptionSelectionUtils;
+import com.trading.common.AlpacaHttpClient;
+import com.trading.common.JsonParsingUtils;
+import com.trading.common.OptionSymbolUtils;
+import com.trading.common.PortfolioEquityValidator;
 import com.trading.common.models.AlpacaCredentials;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.*;
@@ -20,12 +26,11 @@ import java.util.*;
 public class InitiateTradesLambda implements RequestHandler<Map<String, Object>, String> {
 
     private static final String FILTERED_TABLE = System.getenv().getOrDefault("FILTERED_TABLE", "dev-filtered-tickers-table");
-    private static final String ALPACA_SECRET_NAME = System.getenv().getOrDefault("ALPACA_SECRET_NAME", "alpaca-api-keys");
-    private static final String ALPACA_API_URL = System.getenv().getOrDefault("ALPACA_API_URL", "https://paper-api.alpaca.markets/v2");
-    private static final String ALPACA_DATA_URL = "https://data.alpaca.markets/v1beta1";
-    private static final double TARGET_DEBIT_PERCENTAGE = 0.06;
+    private static final String ALPACA_SECRET_NAME = System.getenv().getOrDefault("ALPACA_SECRET_NAME", "trading/alpaca/credentials");
+    // No default position size - only trade tickers with valid position size data
     private static final int CONTRACT_MULTIPLIER = 100;
     private final DynamoDbClient dynamoDbClient;
+    // Note: OptionSelectionUtils is in StockFilterLambda module, so we keep original logic here
 
     public InitiateTradesLambda() {
         this.dynamoDbClient = DynamoDbClient.builder().build();
@@ -42,16 +47,38 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
             String scanDate = (String) input.getOrDefault("scanDate", TradingCommonUtils.getCurrentDateString());
             AlpacaCredentials credentials = TradingCommonUtils.getAlpacaCredentials(ALPACA_SECRET_NAME);
 
-            if (!TradingCommonUtils.isMarketOpen(credentials.getApiKeyId(), credentials.getSecretKey())) {
+            if (!AlpacaHttpClient.isMarketOpen(credentials)) {
                 return TradingErrorHandler.createSkippedResponse("market_closed", Map.of("orders_submitted", 0));
             }
 
             double accountEquity = getAccountEquity(credentials);
-            List<String> tickers = fetchFilteredTickers(scanDate);
+            Map<String, Double> tickerPositionSizes = fetchFilteredTickersWithPositionSizes(scanDate);
             int ordersSubmitted = 0;
-            double totalDebitTarget = accountEquity * TARGET_DEBIT_PERCENTAGE;
+            int ordersRejected = 0;
 
-            for (String ticker : tickers) {
+            if (tickerPositionSizes.isEmpty()) {
+                context.getLogger().log("No valid tickers found with position size data - no trades will be executed");
+                return TradingErrorHandler.createSkippedResponse("no_valid_tickers", Map.of("orders_submitted", 0));
+            }
+
+            for (Map.Entry<String, Double> entry : tickerPositionSizes.entrySet()) {
+                String ticker = entry.getKey();
+                double positionSizePercentage = entry.getValue();
+                
+                double totalDebitTarget = accountEquity * positionSizePercentage;
+                
+                // Check if we have sufficient equity for this trade
+                if (!PortfolioEquityValidator.hasSufficientEquity(totalDebitTarget, credentials, context)) {
+                    context.getLogger().log("Insufficient equity for " + ticker + " trade: $" + 
+                        String.format("%.2f", totalDebitTarget));
+                    ordersRejected++;
+                    continue;
+                }
+                
+                context.getLogger().log("Processing " + ticker + " with position size: " + 
+                    String.format("%.1f%%", positionSizePercentage * 100) + " (debit target: $" + 
+                    String.format("%.2f", totalDebitTarget) + ")");
+                
                 try {
                     Map<String, Object> optionContracts = selectOptionContracts(ticker, credentials);
                     if (optionContracts == null || optionContracts.isEmpty()) continue;
@@ -80,9 +107,12 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
                 }
             }
 
-            context.getLogger().log("Completed processing. Orders submitted: " + ordersSubmitted);
+            context.getLogger().log("Completed processing. Orders submitted: " + ordersSubmitted + 
+                ", Orders rejected: " + ordersRejected);
+            
             return TradingErrorHandler.createSuccessResponse("Processing completed", Map.of(
                 "orders_submitted", ordersSubmitted,
+                "orders_rejected", ordersRejected,
                 "scan_date", scanDate,
                 "account_equity", accountEquity
             ));
@@ -93,10 +123,10 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
     }
 
     /**
-     * Fetches all filtered tickers for the given scan date from DynamoDB
+     * Fetches all filtered tickers with their position sizes for the given scan date from DynamoDB
      */
-    public List<String> fetchFilteredTickers(String scanDate) {
-        return TradingCommonUtils.executeWithErrorHandling("fetching filtered tickers", () -> {
+    public Map<String, Double> fetchFilteredTickersWithPositionSizes(String scanDate) {
+        return TradingCommonUtils.executeWithErrorHandling("fetching filtered tickers with position sizes", () -> {
             ScanRequest scanRequest = ScanRequest.builder()
                 .tableName(FILTERED_TABLE)
                 .filterExpression("scanDate = :scanDate")
@@ -107,18 +137,50 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
 
             ScanResponse response = dynamoDbClient.scan(scanRequest);
             
-            List<String> tickers = new ArrayList<>();
+            Map<String, Double> tickerPositionSizes = new HashMap<>();
+            int totalTickers = 0;
+            int skippedTickers = 0;
+            
             for (Map<String, AttributeValue> item : response.items()) {
                 String ticker = item.get("ticker").s();
                 String status = item.get("status").s();
                 
                 if ("Recommended".equals(status) || "Consider".equals(status)) {
-                    tickers.add(ticker);
+                    totalTickers++;
+                    // Only include tickers with valid position size data
+                    if (item.containsKey("positionSizePercentage") && item.get("positionSizePercentage").n() != null) {
+                        try {
+                            double positionSize = Double.parseDouble(item.get("positionSizePercentage").n());
+                            // Validate position size is reasonable (between 0.01 and 0.20 = 1% to 20%)
+                            if (positionSize >= 0.01 && positionSize <= 0.20) {
+                                tickerPositionSizes.put(ticker, positionSize);
+                            } else {
+                                System.out.println("Skipping " + ticker + " - invalid position size: " + positionSize);
+                                skippedTickers++;
+                            }
+                        } catch (NumberFormatException e) {
+                            System.out.println("Skipping " + ticker + " - corrupted position size data: " + e.getMessage());
+                            skippedTickers++;
+                        }
+                    } else {
+                        System.out.println("Skipping " + ticker + " - missing position size data");
+                        skippedTickers++;
+                    }
                 }
             }
 
-            return tickers;
+            System.out.println("Position size validation: " + tickerPositionSizes.size() + " valid tickers, " + 
+                skippedTickers + " skipped out of " + totalTickers + " total");
+            
+            return tickerPositionSizes;
         });
+    }
+
+    /**
+     * Fetches all filtered tickers for the given scan date from DynamoDB (legacy method)
+     */
+    public List<String> fetchFilteredTickers(String scanDate) {
+        return new ArrayList<>(fetchFilteredTickersWithPositionSizes(scanDate).keySet());
     }
 
     /**
@@ -138,14 +200,18 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
                 throw new RuntimeException("Insufficient option expiration dates found for " + ticker + " - need at least two different expirations for calendar spread");
             }
 
-            String[] symbols = findOptionSymbols(contractsByExpiration, expirations, currentPrice);
+            String[] spreadSymbols = OptionSelectionUtils.findCalendarSpreadSymbols(contractsByExpiration, expirations[0], expirations[1], currentPrice);
+            
+            if (spreadSymbols == null) {
+                throw new RuntimeException("Unable to find calendar spread symbols - no common strike found between " + 
+                    expirations[0] + " and " + expirations[1]);
+            }
             
             Map<String, Object> result = new HashMap<>();
-            result.put("near_symbol", symbols[0]);
-            result.put("far_symbol", symbols[1]);
+            result.put("near_symbol", spreadSymbols[0]);
+            result.put("far_symbol", spreadSymbols[1]);
             result.put("near_exp", expirations[0].toString());
             result.put("far_exp", expirations[1].toString());
-            result.put("strike", findATMStrikeFromContractInfo(contractsByExpiration.get(expirations[0].toString()), currentPrice));
 
             return result;
         });
@@ -159,12 +225,12 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
         String expirationGte = today.plusDays(1).toString();
         String expirationLte = today.plusDays(60).toString();
 
-        String url = ALPACA_DATA_URL + "/options/snapshots/" + ticker + 
+        String endpoint = "/options/snapshots/" + ticker + 
                     "?type=call&expiration_date_gte=" + expirationGte + "&expiration_date_lte=" + expirationLte + 
-                    "&feed=indicative&limit=1000";
+                    "&feed=opra&limit=1000";
 
-        String responseBody = TradingCommonUtils.makeHttpRequest(url, credentials.getApiKeyId(), credentials.getSecretKey(), "GET", null);
-        JsonNode snapshots = TradingCommonUtils.parseJson(responseBody).get("snapshots");
+        String responseBody = AlpacaHttpClient.getAlpacaOptions(endpoint, credentials);
+        JsonNode snapshots = JsonUtils.parseJson(responseBody).get("snapshots");
         if (snapshots == null || !snapshots.isObject() || snapshots.size() == 0) {
             throw new RuntimeException("No option snapshots found for " + ticker);
         }
@@ -174,7 +240,7 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
             String symbol = entry.getKey();
             JsonNode snapshot = entry.getValue();
             try {
-                Map<String, Object> parsed = parseOptionSymbol(symbol);
+                Map<String, Object> parsed = OptionSymbolUtils.parseOptionSymbol(symbol);
                 String expiration = (String) parsed.get("expiration");
                 double strike = (Double) parsed.get("strike");
                 
@@ -199,61 +265,25 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
     private LocalDate[] selectNearAndFarExpirations(Map<String, List<Map<String, Object>>> contractsByExpiration) {
         LocalDate today = LocalDate.now(ZoneId.of("America/New_York"));
         
-        List<LocalDate> expirations = contractsByExpiration.keySet().stream()
-            .map(exp -> {
-                try { return LocalDate.parse(exp); } 
-                catch (Exception e) { return null; }
-            })
-            .filter(Objects::nonNull)
-            .sorted()
-            .collect(ArrayList::new, ArrayList::add, ArrayList::addAll);
-
-        LocalDate nearExpiration = expirations.stream()
-            .filter(exp -> exp.isAfter(today))
-            .findFirst()
-            .orElse(null);
-
-        LocalDate farExpiration = expirations.stream()
-            .filter(exp -> exp.isAfter(nearExpiration))
-            .min((a, b) -> Long.compare(
-                Math.abs(a.toEpochDay() - today.plusDays(30).toEpochDay()),
-                Math.abs(b.toEpochDay() - today.plusDays(30).toEpochDay())
-            ))
-            .orElse(null);
+        // Convert to string list for shared utility
+        List<String> expirationStrings = new ArrayList<>(contractsByExpiration.keySet());
+        
+        // Use shared utility for consistency
+        LocalDate nearExpiration = OptionSelectionUtils.findShortLegExpiration(expirationStrings, today);
+        LocalDate farExpiration = OptionSelectionUtils.findFarLegExpiration(expirationStrings, today, nearExpiration);
             
         return new LocalDate[]{nearExpiration, farExpiration};
     }
 
-    /**
-     * Finds option symbols for near and far legs
-     */
-    private String[] findOptionSymbols(Map<String, List<Map<String, Object>>> contractsByExpiration, 
-                                     LocalDate[] expirations, double currentPrice) {
-        double nearStrike = findATMStrikeFromContractInfo(contractsByExpiration.get(expirations[0].toString()), currentPrice);
-        double farStrike = findATMStrikeFromContractInfo(contractsByExpiration.get(expirations[1].toString()), currentPrice);
-
-        if (nearStrike <= 0 || farStrike <= 0) {
-            throw new RuntimeException("Unable to find valid ATM strikes - nearStrike: " + nearStrike + ", farStrike: " + farStrike);
-        }
-
-        String nearSymbol = findSymbolForStrike(contractsByExpiration.get(expirations[0].toString()), nearStrike);
-        String farSymbol = findSymbolForStrike(contractsByExpiration.get(expirations[1].toString()), farStrike);
-
-        if (nearSymbol == null || farSymbol == null) {
-            throw new RuntimeException("Unable to find option symbols - nearSymbol: " + nearSymbol + ", farSymbol: " + farSymbol);
-        }
-
-        return new String[]{nearSymbol, farSymbol};
-    }
 
     /**
      * Calculates the debit for a calendar spread
      */
     public double calculateDebit(String nearSymbol, String farSymbol, AlpacaCredentials credentials) {
         return TradingCommonUtils.executeWithErrorHandling("calculating debit", () -> {
-            String url = ALPACA_DATA_URL + "/options/quotes/latest?symbols=" + nearSymbol + "," + farSymbol + "&feed=indicative";
-            String responseBody = TradingCommonUtils.makeHttpRequest(url, credentials.getApiKeyId(), credentials.getSecretKey(), "GET", null);
-            JsonNode quotes = TradingCommonUtils.parseJson(responseBody).get("quotes");
+            String endpoint = "/options/quotes/latest?symbols=" + nearSymbol + "," + farSymbol + "&feed=opra";
+            String responseBody = AlpacaHttpClient.getAlpacaOptions(endpoint, credentials);
+            JsonNode quotes = JsonUtils.parseJson(responseBody).get("quotes");
             
             if (quotes == null || !quotes.isObject()) return 0.0;
             
@@ -261,8 +291,8 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
             JsonNode farQuote = quotes.get(farSymbol);
             if (nearQuote == null || farQuote == null) return 0.0;
             
-            double nearBid = getBidPrice(nearQuote);
-            double farAsk = getAskPrice(farQuote);
+            double nearBid = JsonParsingUtils.getBidPrice(nearQuote);
+            double farAsk = JsonParsingUtils.getAskPrice(farQuote);
             return Math.max(0.0, farAsk - nearBid);
         });
     }
@@ -272,9 +302,8 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
      */
     public double getAccountEquity(AlpacaCredentials credentials) {
         return TradingCommonUtils.executeWithErrorHandling("getting account equity", () -> {
-            String url = ALPACA_API_URL + "/account";
-            String responseBody = TradingCommonUtils.makeHttpRequest(url, credentials.getApiKeyId(), credentials.getSecretKey(), "GET", null);
-            return TradingCommonUtils.parseJson(responseBody).get("equity").asDouble();
+            String responseBody = AlpacaHttpClient.getAlpacaTrading("/account", credentials);
+            return JsonUtils.parseJson(responseBody).get("equity").asDouble();
         });
     }
 
@@ -307,7 +336,7 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
             legs.add(nearLeg);
 
             order.put("legs", legs);
-            return TradingCommonUtils.toJson(order);
+            return JsonUtils.toJson(order);
         });
     }
 
@@ -316,9 +345,8 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
      */
     public Map<String, Object> submitOrder(String orderJson, AlpacaCredentials credentials) {
         return TradingCommonUtils.executeWithErrorHandling("submitting order", () -> {
-            String url = ALPACA_API_URL + "/orders";
-            String responseBody = TradingCommonUtils.makeHttpRequest(url, credentials.getApiKeyId(), credentials.getSecretKey(), "POST", orderJson);
-            JsonNode orderNode = TradingCommonUtils.parseJson(responseBody);
+            String responseBody = AlpacaHttpClient.postAlpacaTrading("/orders", orderJson, credentials);
+            JsonNode orderNode = JsonUtils.parseJson(responseBody);
             return Map.of(
                 "orderId", orderNode.get("id").asText(),
                 "status", orderNode.get("status").asText()
@@ -329,102 +357,16 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
 
     // Helper methods
 
-    private Map<String, Object> parseOptionSymbol(String symbol) {
-        if (symbol.length() < 15) {
-            throw new RuntimeException("Invalid option symbol format - too short: " + symbol);
-        }
-        
-        int optionTypeIndex = -1;
-        for (int i = 4; i < symbol.length(); i++) {
-            if (symbol.charAt(i) == 'C' || symbol.charAt(i) == 'P') {
-                optionTypeIndex = i;
-                break;
-            }
-        }
-        
-        if (optionTypeIndex < 10) {
-            throw new RuntimeException("Invalid option symbol format - cannot find option type: " + symbol);
-        }
-        
-        try {
-            String expirationStr = symbol.substring(optionTypeIndex - 6, optionTypeIndex);
-            String year = "20" + expirationStr.substring(0, 2);
-            String month = expirationStr.substring(2, 4);
-            String day = expirationStr.substring(4, 6);
-            String expiration = year + "-" + month + "-" + day;
-            
-            String strikeStr = symbol.substring(optionTypeIndex + 1);
-            double strike = Double.parseDouble(strikeStr) / 1000.0;
-            
-            Map<String, Object> result = new HashMap<>();
-            result.put("expiration", expiration);
-            result.put("strike", strike);
-            return result;
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to parse option symbol: " + symbol + " - " + e.getMessage(), e);
-        }
-    }
 
     private double getCurrentStockPrice(String ticker, AlpacaCredentials credentials) {
-        String url = ALPACA_DATA_URL + "/stocks/" + ticker + "/quotes/latest?feed=indicative";
-        String responseBody = TradingCommonUtils.makeHttpRequest(url, credentials.getApiKeyId(), credentials.getSecretKey(), "GET", null);
-        JsonNode quote = TradingCommonUtils.parseJson(responseBody).get("quote");
-        return quote != null ? getMidPrice(quote) : 0.0;
+        String endpoint = "/stocks/" + ticker + "/quotes/latest?feed=opra";
+        String responseBody = AlpacaHttpClient.getAlpacaData(endpoint, credentials);
+        JsonNode quote = JsonUtils.parseJson(responseBody).get("quote");
+        return quote != null ? JsonParsingUtils.getMidPrice(quote) : 0.0;
     }
 
 
-    private double findATMStrikeFromContractInfo(List<Map<String, Object>> contractInfos, double currentPrice) {
-        if (contractInfos == null || contractInfos.isEmpty()) {
-            return 0.0;
-        }
 
-        double closestStrike = 0.0;
-        double minDiff = Double.MAX_VALUE;
-
-        for (Map<String, Object> contractInfo : contractInfos) {
-            double strike = (Double) contractInfo.get("strike");
-            double diff = Math.abs(strike - currentPrice);
-            if (diff < minDiff) {
-                minDiff = diff;
-                closestStrike = strike;
-            }
-        }
-
-        return closestStrike;
-    }
-
-    private String findSymbolForStrike(List<Map<String, Object>> contractInfos, double targetStrike) {
-        if (contractInfos == null || contractInfos.isEmpty()) {
-            throw new RuntimeException("No contract information available for strike " + targetStrike);
-        }
-
-        for (Map<String, Object> contractInfo : contractInfos) {
-            double strike = (Double) contractInfo.get("strike");
-            if (Math.abs(strike - targetStrike) < 0.001) { // Allow for small floating point differences
-                return (String) contractInfo.get("symbol");
-            }
-        }
-
-        throw new RuntimeException("No contract found for strike " + targetStrike + " in available contracts");
-    }
-
-    private double getPrice(JsonNode quote, String field) {
-        return quote.has(field) ? quote.get(field).asDouble() : 0.0;
-    }
-
-    private double getBidPrice(JsonNode quote) {
-        return getPrice(quote, "bp");
-    }
-
-    private double getAskPrice(JsonNode quote) {
-        return getPrice(quote, "ap");
-    }
-
-    private double getMidPrice(JsonNode quote) {
-        double bid = getBidPrice(quote);
-        double ask = getAskPrice(quote);
-        return (bid > 0 && ask > 0) ? (bid + ask) / 2.0 : getPrice(quote, "last");
-    }
 
     private int calculateQuantity(double debit, double totalDebitTarget) {
         if (debit <= 0) {

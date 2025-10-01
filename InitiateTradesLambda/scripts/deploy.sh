@@ -99,7 +99,7 @@ deploy_with_sam() {
         --parameter-overrides \
             FilteredTickersTableName=FilteredTickersTable \
             OrdersTableName=OrdersTable \
-            AlpacaSecretName=alpaca-api-keys \
+            AlpacaSecretName=trading/alpaca/credentials \
         --confirm-changeset
     
     print_status "SAM deployment completed."

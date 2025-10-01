@@ -1,14 +1,20 @@
 package com.example;
 
 import com.amazonaws.services.lambda.runtime.Context;
-import com.example.AlpacaApiService.HistoricalBar;
-import com.example.AlpacaApiService.LatestTrade;
+import com.trading.common.models.HistoricalBar;
+import com.trading.common.models.LatestTrade;
+import com.trading.common.models.AlpacaCredentials;
+import com.trading.common.AlpacaHttpClient;
+import com.trading.common.JsonUtils;
+import com.trading.common.JsonParsingUtils;
+import com.trading.common.PriceUtils;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Common utilities for stock filtering operations
@@ -16,10 +22,10 @@ import java.util.Map;
  */
 public class StockFilterCommonUtils {
     
-    private final AlpacaApiService alpacaApiService;
+    private final AlpacaCredentials credentials;
     
-    public StockFilterCommonUtils(AlpacaApiService alpacaApiService) {
-        this.alpacaApiService = alpacaApiService;
+    public StockFilterCommonUtils(AlpacaCredentials credentials) {
+        this.credentials = credentials;
     }
     
     /**
@@ -27,7 +33,7 @@ public class StockFilterCommonUtils {
      */
     public double getCurrentStockPrice(String ticker, Context context) {
         try {
-            LatestTrade latestTrade = alpacaApiService.getLatestTrade(ticker);
+            LatestTrade latestTrade = AlpacaHttpClient.getLatestTrade(ticker, credentials);
             if (latestTrade != null) {
                 return latestTrade.getPrice();
             }
@@ -48,7 +54,7 @@ public class StockFilterCommonUtils {
             if (finnhubApiKey == null) {
                 // Try to get from secrets manager
                 try {
-                    finnhubApiKey = com.trading.common.TradingCommonUtils.getAlpacaCredentials("finnhub-secret").getApiKey();
+                    finnhubApiKey = com.trading.common.TradingCommonUtils.getAlpacaCredentials("trading/finnhub/credentials").getApiKey();
                 } catch (Exception e) {
                     context.getLogger().log("Could not retrieve Finnhub API key: " + e.getMessage());
                     return new ArrayList<>();
@@ -61,8 +67,8 @@ public class StockFilterCommonUtils {
             
             context.getLogger().log("Fetching earnings data from: " + earningsUrl);
             
-            String earningsResponse = com.trading.common.TradingCommonUtils.makeHttpRequest(earningsUrl, "", "", "GET", null);
-            JsonNode earningsArray = com.trading.common.TradingCommonUtils.parseJson(earningsResponse);
+            String earningsResponse = AlpacaHttpClient.makeAlpacaRequest(earningsUrl, "GET", null, credentials);
+            JsonNode earningsArray = JsonUtils.parseJson(earningsResponse);
             
             List<EarningsData> earningsList = new ArrayList<>();
             if (earningsArray.isArray()) {
@@ -95,28 +101,7 @@ public class StockFilterCommonUtils {
      */
     public double calculateEarningsDayMove(String ticker, LocalDate earningsDate, Context context) {
         try {
-            // Get more historical data to cover older earnings dates
-            List<HistoricalBar> historicalBars = alpacaApiService.getHistoricalBars(ticker, 365);
-            if (historicalBars == null || historicalBars.isEmpty()) {
-                return -1.0; // Indicate no data
-            }
-            
-            // Sort by timestamp to ensure chronological order
-            historicalBars.sort((a, b) -> a.getTimestamp().compareTo(b.getTimestamp()));
-            
-            // Find the bar for the earnings date
-            HistoricalBar earningsBar = historicalBars.stream()
-                .filter(bar -> {
-                    try {
-                        LocalDate barDate = LocalDate.parse(bar.getTimestamp().substring(0, 10));
-                        return barDate.equals(earningsDate);
-                    } catch (Exception e) {
-                        return false;
-                    }
-                })
-                .findFirst()
-                .orElse(null);
-            
+            HistoricalBar earningsBar = getHistoricalBarForDate(ticker, earningsDate, context);
             if (earningsBar == null) {
                 return -1.0; // Indicate no data
             }
@@ -143,45 +128,13 @@ public class StockFilterCommonUtils {
      */
     public double calculateEarningsDayMoveWithGaps(String ticker, LocalDate earningsDate, Context context) {
         try {
-            // Get more historical data to cover older earnings dates
-            List<HistoricalBar> historicalBars = alpacaApiService.getHistoricalBars(ticker, 365);
-            if (historicalBars == null || historicalBars.isEmpty()) {
-                return -1.0; // Indicate no data
-            }
-            
-            // Sort by timestamp to ensure chronological order
-            historicalBars.sort((a, b) -> a.getTimestamp().compareTo(b.getTimestamp()));
-            
-            // Find the bar for the earnings date
-            HistoricalBar earningsBar = historicalBars.stream()
-                .filter(bar -> {
-                    try {
-                        LocalDate barDate = LocalDate.parse(bar.getTimestamp().substring(0, 10));
-                        return barDate.equals(earningsDate);
-                    } catch (Exception e) {
-                        return false;
-                    }
-                })
-                .findFirst()
-                .orElse(null);
-            
+            HistoricalBar earningsBar = getHistoricalBarForDate(ticker, earningsDate, context);
             if (earningsBar == null) {
                 return -1.0; // Indicate no data
             }
             
             // Find the previous trading day's bar
-            HistoricalBar previousBar = historicalBars.stream()
-                .filter(bar -> {
-                    try {
-                        LocalDate barDate = LocalDate.parse(bar.getTimestamp().substring(0, 10));
-                        return barDate.isBefore(earningsDate);
-                    } catch (Exception e) {
-                        return false;
-                    }
-                })
-                .max((a, b) -> a.getTimestamp().compareTo(b.getTimestamp()))
-                .orElse(null);
-            
+            HistoricalBar previousBar = getPreviousTradingDayBar(ticker, earningsDate, context);
             if (previousBar == null) {
                 // Fallback to regular open-to-close calculation
                 return calculateEarningsDayMove(ticker, earningsDate, context);
@@ -213,59 +166,68 @@ public class StockFilterCommonUtils {
     /**
      * Find ATM option from option chain
      */
-    public AlpacaApiService.OptionSnapshot findATMOption(Map<String, AlpacaApiService.OptionSnapshot> optionChain, double currentPrice) {
-        if (optionChain.isEmpty()) return null;
-        
-        AlpacaApiService.OptionSnapshot closestOption = null;
-        double minDifference = Double.MAX_VALUE;
-        
-        for (AlpacaApiService.OptionSnapshot option : optionChain.values()) {
-            double strikeDifference = Math.abs(option.getStrike() - currentPrice);
-            if (strikeDifference < minDifference) {
-                minDifference = strikeDifference;
-                closestOption = option;
-            }
-        }
-        
-        return closestOption;
+    public com.trading.common.models.OptionSnapshot findATMOption(Map<String, com.trading.common.models.OptionSnapshot> optionChain, double currentPrice) {
+        return findATMOption(optionChain, currentPrice, false);
     }
     
     /**
      * Find ATM option with shortest expiration from option chain
      * This method finds the option closest to current price that has the earliest expiration
      */
-    public AlpacaApiService.OptionSnapshot findShortestExpirationATMOption(Map<String, AlpacaApiService.OptionSnapshot> optionChain, double currentPrice) {
+    public com.trading.common.models.OptionSnapshot findShortestExpirationATMOption(Map<String, com.trading.common.models.OptionSnapshot> optionChain, double currentPrice) {
+        return findATMOption(optionChain, currentPrice, true);
+    }
+    
+    /**
+     * Find ATM option from option chain with optional expiration preference
+     * @param optionChain Map of option symbols to OptionSnapshot objects
+     * @param currentPrice Current stock price for ATM calculation
+     * @param preferShortestExpiration If true, prefer options with shorter expiration dates
+     * @return The best matching option, or null if none found
+     */
+    private com.trading.common.models.OptionSnapshot findATMOption(Map<String, com.trading.common.models.OptionSnapshot> optionChain, 
+                                                                  double currentPrice, 
+                                                                  boolean preferShortestExpiration) {
         if (optionChain.isEmpty()) return null;
         
-        AlpacaApiService.OptionSnapshot bestOption = null;
+        com.trading.common.models.OptionSnapshot bestOption = null;
         double minStrikeDifference = Double.MAX_VALUE;
         LocalDate earliestExpiration = null;
         
-        for (Map.Entry<String, AlpacaApiService.OptionSnapshot> entry : optionChain.entrySet()) {
-            AlpacaApiService.OptionSnapshot option = entry.getValue();
-            String symbol = entry.getKey();
-            
-            // Extract expiration date from option symbol (format: SYMBOL + YYMMDD + C/P + STRIKE)
-            // For example: AAPL250103C00150000 -> 250103 (Jan 3, 2025)
-            LocalDate expiration = parseExpirationFromSymbol(symbol);
-            if (expiration == null) continue;
-            
+        for (Map.Entry<String, com.trading.common.models.OptionSnapshot> entry : optionChain.entrySet()) {
+            com.trading.common.models.OptionSnapshot option = entry.getValue();
             double strikeDifference = Math.abs(option.getStrike() - currentPrice);
             
-            // Prefer option with shorter expiration, or if same expiration, closer strike
             boolean isBetter = false;
-            if (earliestExpiration == null) {
-                isBetter = true;
-            } else if (expiration.isBefore(earliestExpiration)) {
-                isBetter = true;
-            } else if (expiration.equals(earliestExpiration) && strikeDifference < minStrikeDifference) {
-                isBetter = true;
+            
+            if (preferShortestExpiration) {
+                // Extract expiration date from option symbol
+                String symbol = entry.getKey();
+                LocalDate expiration = parseExpirationFromSymbol(symbol);
+                if (expiration == null) continue;
+                
+                // Prefer option with shorter expiration, or if same expiration, closer strike
+                if (earliestExpiration == null) {
+                    isBetter = true;
+                } else if (expiration.isBefore(earliestExpiration)) {
+                    isBetter = true;
+                } else if (expiration.equals(earliestExpiration) && strikeDifference < minStrikeDifference) {
+                    isBetter = true;
+                }
+            } else {
+                // Simple closest strike selection
+                if (strikeDifference < minStrikeDifference) {
+                    isBetter = true;
+                }
             }
             
             if (isBetter) {
                 minStrikeDifference = strikeDifference;
                 bestOption = option;
-                earliestExpiration = expiration;
+                if (preferShortestExpiration) {
+                    String symbol = entry.getKey();
+                    earliestExpiration = parseExpirationFromSymbol(symbol);
+                }
             }
         }
         
@@ -346,38 +308,14 @@ public class StockFilterCommonUtils {
      * Calculate RV30 from historical bars
      */
     public double calculateRV30(List<HistoricalBar> historicalBars, Context context) {
-        try {
-            // Get the most recent 30 days
-            int startIndex = Math.max(historicalBars.size() - 30, 0);
-            List<HistoricalBar> last30Days = historicalBars.subList(startIndex, historicalBars.size());
-            
-            if (last30Days.size() < 2) return 0.0;
-            
-            return calculateHistoricalVolatilityFromBars(last30Days);
-            
-        } catch (Exception e) {
-            context.getLogger().log("Error calculating RV30: " + e.getMessage());
-            return 0.0;
-        }
+        return calculateVolatilityForPeriod(historicalBars, 30, "RV30", context);
     }
     
     /**
      * Calculate IV30 from historical bars
      */
     public double calculateIV30(List<HistoricalBar> historicalBars, Context context) {
-        try {
-            // Get the most recent 30 days
-            int startIndex = Math.max(historicalBars.size() - 30, 0);
-            List<HistoricalBar> last30Days = historicalBars.subList(startIndex, historicalBars.size());
-            
-            if (last30Days.size() < 2) return 0.0;
-            
-            return calculateHistoricalVolatilityFromBars(last30Days);
-            
-        } catch (Exception e) {
-            context.getLogger().log("Error calculating IV30: " + e.getMessage());
-            return 0.0;
-        }
+        return calculateVolatilityForPeriod(historicalBars, 30, "IV30", context);
     }
     
     /**
@@ -387,15 +325,9 @@ public class StockFilterCommonUtils {
         try {
             if (historicalBars.size() < 60) return 0.0;
             
-            // Calculate 30-day volatility
-            int start30 = Math.max(historicalBars.size() - 30, 0);
-            List<HistoricalBar> last30Days = historicalBars.subList(start30, historicalBars.size());
-            double vol30 = calculateHistoricalVolatilityFromBars(last30Days);
-            
-            // Calculate 60-day volatility
-            int start60 = Math.max(historicalBars.size() - 60, 0);
-            List<HistoricalBar> last60Days = historicalBars.subList(start60, historicalBars.size());
-            double vol60 = calculateHistoricalVolatilityFromBars(last60Days);
+            // Calculate 30-day and 60-day volatility
+            double vol30 = calculateVolatilityForPeriod(historicalBars, 30, "TermStructure30", context);
+            double vol60 = calculateVolatilityForPeriod(historicalBars, 60, "TermStructure60", context);
             
             return vol60 - vol30;
             
@@ -403,6 +335,248 @@ public class StockFilterCommonUtils {
             context.getLogger().log("Error calculating term structure slope: " + e.getMessage());
             return 0.0;
         }
+    }
+    
+    // ===== HELPER METHODS FOR CODE REUSE =====
+    
+    /**
+     * Get historical bar for a specific date
+     * Helper method to eliminate duplication in earnings move calculations
+     */
+    private HistoricalBar getHistoricalBarForDate(String ticker, LocalDate targetDate, Context context) {
+        return getHistoricalBar(ticker, targetDate, false, context);
+    }
+    
+    /**
+     * Get previous trading day bar before a specific date
+     * Helper method for earnings move with gaps calculation
+     */
+    private HistoricalBar getPreviousTradingDayBar(String ticker, LocalDate targetDate, Context context) {
+        return getHistoricalBar(ticker, targetDate, true, context);
+    }
+    
+    /**
+     * Get historical bar for a specific date or the previous trading day
+     * @param ticker Stock ticker symbol
+     * @param targetDate Target date for the bar
+     * @param getPrevious If true, get the previous trading day before targetDate; if false, get the bar for targetDate
+     * @param context Lambda context for logging
+     * @return HistoricalBar or null if not found
+     */
+    private HistoricalBar getHistoricalBar(String ticker, LocalDate targetDate, boolean getPrevious, Context context) {
+        try {
+            // Get more historical data to cover older earnings dates
+            List<HistoricalBar> historicalBars = AlpacaHttpClient.getHistoricalBars(ticker, 365, credentials);
+            if (historicalBars == null || historicalBars.isEmpty()) {
+                return null;
+            }
+            
+            // Sort by timestamp to ensure chronological order
+            historicalBars.sort((a, b) -> a.getTimestamp().compareTo(b.getTimestamp()));
+            
+            if (getPrevious) {
+                // Find the previous trading day's bar
+                return historicalBars.stream()
+                    .filter(bar -> {
+                        try {
+                            LocalDate barDate = LocalDate.parse(bar.getTimestamp().substring(0, 10));
+                            return barDate.isBefore(targetDate);
+                        } catch (Exception e) {
+                            return false;
+                        }
+                    })
+                    .max((a, b) -> a.getTimestamp().compareTo(b.getTimestamp()))
+                    .orElse(null);
+            } else {
+                // Find the bar for the target date
+                return historicalBars.stream()
+                    .filter(bar -> {
+                        try {
+                            LocalDate barDate = LocalDate.parse(bar.getTimestamp().substring(0, 10));
+                            return barDate.equals(targetDate);
+                        } catch (Exception e) {
+                            return false;
+                        }
+                    })
+                    .findFirst()
+                    .orElse(null);
+            }
+                
+        } catch (Exception e) {
+            String operation = getPrevious ? "previous trading day bar" : "historical bar";
+            context.getLogger().log("Error getting " + operation + " for " + ticker + " on " + targetDate + ": " + e.getMessage());
+            return null;
+        }
+    }
+    
+    /**
+     * Calculate volatility for a specific period from historical bars
+     * Helper method to eliminate duplication in volatility calculations
+     */
+    private double calculateVolatilityForPeriod(List<HistoricalBar> historicalBars, int days, String periodName, Context context) {
+        try {
+            // Get the most recent N days
+            List<HistoricalBar> periodBars = getLastNDays(historicalBars, days);
+            
+            if (periodBars.size() < 2) return 0.0;
+            
+            return calculateHistoricalVolatilityFromBars(periodBars);
+            
+        } catch (Exception e) {
+            context.getLogger().log("Error calculating " + periodName + ": " + e.getMessage());
+            return 0.0;
+        }
+    }
+    
+    /**
+     * Get the last N days from historical bars
+     * Helper method to eliminate duplication in period extraction
+     */
+    private List<HistoricalBar> getLastNDays(List<HistoricalBar> historicalBars, int days) {
+        int startIndex = Math.max(historicalBars.size() - days, 0);
+        return historicalBars.subList(startIndex, historicalBars.size());
+    }
+    
+    // ===== CONSOLIDATED HELPER METHODS FOR FILTER REUSE =====
+    
+    /**
+     * Get option chain for a specific date range
+     * Consolidated method used by multiple filters
+     */
+    public Map<String, com.trading.common.models.OptionSnapshot> getOptionChainForDateRange(String ticker, LocalDate baseDate, 
+                                                                                          int minDays, int maxDays, String optionType, 
+                                                                                          com.trading.common.models.AlpacaCredentials credentials, Context context) {
+        try {
+            LocalDate startDate = baseDate.plusDays(minDays);
+            LocalDate endDate = baseDate.plusDays(maxDays);
+            return com.trading.common.AlpacaHttpClient.getOptionChain(ticker, startDate, endDate, optionType, credentials);
+        } catch (Exception e) {
+            context.getLogger().log("Error getting option chain for " + ticker + " (" + minDays + "-" + maxDays + " days): " + e.getMessage());
+            return new java.util.HashMap<>();
+        }
+    }
+    
+    /**
+     * Get IV for a specific strike from an option chain
+     * Consolidated method used by multiple filters
+     */
+    public double getIVForStrikeFromChain(Map<String, com.trading.common.models.OptionSnapshot> optionChain, double targetStrike, 
+                                        String legName, Context context) {
+        try {
+            if (optionChain.isEmpty()) {
+                context.getLogger().log("No " + legName + " options available");
+                return 0.0;
+            }
+            
+            // Find option with the target strike
+            com.trading.common.models.OptionSnapshot option = com.trading.common.OptionSelectionUtils.findOptionForStrikeInOptionSnapshotChain(optionChain, targetStrike);
+            if (option == null) {
+                context.getLogger().log("No " + legName + " option found for strike " + targetStrike);
+                return 0.0;
+            }
+            
+            double impliedVol = option.getImpliedVol();
+            if (!isValidImpliedVolatility(impliedVol, legName, context)) {
+                return 0.0;
+            }
+            
+            context.getLogger().log("Found " + legName + " IV: " + String.format("%.3f", impliedVol) + " at strike " + targetStrike);
+            return impliedVol;
+            
+        } catch (Exception e) {
+            context.getLogger().log("Error getting IV for " + legName + " strike " + targetStrike + ": " + e.getMessage());
+            return 0.0;
+        }
+    }
+    
+    /**
+     * Find the strike closest to current price
+     * Consolidated method used by multiple filters
+     */
+    public double findClosestStrikeToPrice(Set<Double> strikes, double currentPrice) {
+        if (strikes == null || strikes.isEmpty() || currentPrice <= 0) {
+            return -1.0;
+        }
+        
+        return strikes.stream()
+            .min(java.util.Comparator.comparing(strike -> Math.abs(strike - currentPrice)))
+            .orElse(-1.0);
+    }
+    
+    /**
+     * Collect all strikes from multiple option chains
+     * Consolidated method used by multiple filters
+     */
+    @SafeVarargs
+    public final Set<Double> collectAllStrikesFromChains(Map<String, com.trading.common.models.OptionSnapshot>... chains) {
+        Set<Double> allStrikes = new java.util.HashSet<>();
+        
+        for (Map<String, com.trading.common.models.OptionSnapshot> chain : chains) {
+            if (chain != null && !chain.isEmpty()) {
+                chain.values().forEach(option -> allStrikes.add(option.getStrike()));
+            }
+        }
+        
+        return allStrikes;
+    }
+    
+    /**
+     * Validate implied volatility value
+     * Consolidated method used by multiple filters
+     */
+    public boolean isValidImpliedVolatility(double impliedVol, String legName, Context context) {
+        if (impliedVol <= 0) {
+            context.getLogger().log("Invalid implied volatility for " + legName + " option");
+            return false;
+        }
+        return true;
+    }
+    
+    /**
+     * Calculate mid date between start and end dates
+     * Consolidated method used by multiple filters
+     */
+    public LocalDate calculateMidDate(LocalDate startDate, LocalDate endDate) {
+        return startDate.plusDays((int) java.time.temporal.ChronoUnit.DAYS.between(startDate, endDate) / 2);
+    }
+    
+    /**
+     * Calculate recency weight for earnings data
+     * Recent earnings (last 2 years) get weight 2.0, older get weight 1.0
+     * Consolidated method used by multiple filters
+     */
+    public double calculateRecencyWeight(LocalDate earningsDate, LocalDate cutoffDate) {
+        if (earningsDate.isAfter(cutoffDate)) {
+            return 2.0; // Recent earnings get double weight
+        } else {
+            return 1.0; // Older earnings get normal weight
+        }
+    }
+    
+    /**
+     * Get mid price from contract data with bid/ask validation
+     * Consolidated method used by multiple filters
+     */
+    public double getMidPriceFromContract(Map<String, Object> contract) {
+        try {
+            JsonNode snapshot = (JsonNode) contract.get("snapshot");
+            if (snapshot == null || !snapshot.has("quote")) {
+                return -1.0;
+            }
+            
+            JsonNode quote = snapshot.get("quote");
+            return JsonParsingUtils.getValidatedMidPrice(quote);
+        } catch (Exception e) {
+            return -1.0;
+        }
+    }
+    
+    /**
+     * Check if bid/ask spread is valid for trading
+     * Consolidated method used by multiple filters
+     */
+    public boolean isValidBidAskSpread(double bid, double ask, double maxSpreadRatio) {
+        return PriceUtils.isValidBidAsk(bid, ask) && PriceUtils.isSpreadAcceptable(bid, ask, maxSpreadRatio);
     }
     
     /**

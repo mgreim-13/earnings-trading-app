@@ -74,7 +74,7 @@ All filters are configurable via environment variables:
 ```yaml
 Environment:
   Variables:
-    VOLUME_THRESHOLD: '1000000'
+    VOLUME_THRESHOLD: '2000000'
     RATIO_THRESHOLD: '1.2'
     SLOPE_THRESHOLD: '-0.00406'
     MIN_AVERAGE_VOLUME: '500000'

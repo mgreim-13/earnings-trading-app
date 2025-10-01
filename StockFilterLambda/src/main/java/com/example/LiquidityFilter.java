@@ -1,9 +1,17 @@
 package com.example;
 
 import com.amazonaws.services.lambda.runtime.Context;
-import com.example.AlpacaApiService.OptionSnapshot;
+import com.trading.common.models.OptionSnapshot;
+import com.trading.common.models.OptionTrade;
+import com.trading.common.models.LatestTrade;
+import com.trading.common.models.HistoricalBar;
+import com.trading.common.models.AlpacaCredentials;
+import com.trading.common.models.StockData;
+import com.trading.common.AlpacaHttpClient;
+import com.trading.common.OptionSelectionUtils;
 
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
 
@@ -13,7 +21,7 @@ import java.util.Map;
  */
 public class LiquidityFilter {
     
-    private final AlpacaApiService alpacaApiService;
+    private final AlpacaCredentials credentials;
     private final StockFilterCommonUtils commonUtils;
     
     // Thresholds
@@ -24,17 +32,17 @@ public class LiquidityFilter {
     private final double MIN_STOCK_PRICE;
     private final double MAX_STOCK_PRICE;
     
-    public LiquidityFilter(AlpacaApiService alpacaApiService, StockFilterCommonUtils commonUtils) {
-        this.alpacaApiService = alpacaApiService;
+    public LiquidityFilter(AlpacaCredentials credentials, StockFilterCommonUtils commonUtils) {
+        this.credentials = credentials;
         this.commonUtils = commonUtils;
         
-        // Load thresholds from environment
-        this.VOLUME_THRESHOLD = Double.parseDouble(System.getenv().getOrDefault("VOLUME_THRESHOLD", "1000000"));
-        this.BID_ASK_THRESHOLD = Double.parseDouble(System.getenv().getOrDefault("BID_ASK_THRESHOLD", "0.05"));
-        this.QUOTE_DEPTH_THRESHOLD = Long.parseLong(System.getenv().getOrDefault("QUOTE_DEPTH_THRESHOLD", "50"));
-        this.MIN_DAILY_OPTION_TRADES = Long.parseLong(System.getenv().getOrDefault("MIN_DAILY_OPTION_TRADES", "50"));
-        this.MIN_STOCK_PRICE = Double.parseDouble(System.getenv().getOrDefault("MIN_STOCK_PRICE", "20.0"));
-        this.MAX_STOCK_PRICE = Double.parseDouble(System.getenv().getOrDefault("MAX_STOCK_PRICE", "1000.0"));
+        // Load thresholds from environment - Updated for earnings calendar spreads
+        this.VOLUME_THRESHOLD = Double.parseDouble(System.getenv().getOrDefault("VOLUME_THRESHOLD", "2000000")); // Increased for better liquidity
+        this.BID_ASK_THRESHOLD = Double.parseDouble(System.getenv().getOrDefault("BID_ASK_THRESHOLD", "0.08")); // 60% wider tolerance for earnings volatility
+        this.QUOTE_DEPTH_THRESHOLD = Long.parseLong(System.getenv().getOrDefault("QUOTE_DEPTH_THRESHOLD", "100")); // 2x higher for better fills during volatility
+        this.MIN_DAILY_OPTION_TRADES = Long.parseLong(System.getenv().getOrDefault("MIN_DAILY_OPTION_TRADES", "500")); // 10x higher for earnings options activity
+        this.MIN_STOCK_PRICE = Double.parseDouble(System.getenv().getOrDefault("MIN_STOCK_PRICE", "25.0")); // Tighter range for better liquidity
+        this.MAX_STOCK_PRICE = Double.parseDouble(System.getenv().getOrDefault("MAX_STOCK_PRICE", "500.0")); // Tighter range for better liquidity
     }
     
     /**
@@ -81,44 +89,43 @@ public class LiquidityFilter {
     
     /**
      * Get comprehensive options liquidity data for both short and long legs
+     * Uses scan date as base date - all filters find the same options
      */
     private OptionsLiquidityData getOptionsLiquidityData(String ticker, double currentPrice, Context context) {
         try {
-            LocalDate today = LocalDate.now();
+            LocalDate scanDate = LocalDate.now(ZoneId.of("America/New_York")); // Scan date = day before earnings
             
-            // Check short leg (earnings +1 day, with fallback to today +7 days)
-            LocalDate shortExp = today.plusDays(1); // Default to tomorrow
-            LocalDate shortStart = shortExp.minusDays(2);
-            LocalDate shortEnd = shortExp.plusDays(2);
+            // Get wide range of options (1-60 days) to find proper legs
+            Map<String, OptionSnapshot> allOptions = getOptionChainForLeg(ticker, scanDate, 1, 60, context);
             
-            Map<String, OptionSnapshot> shortChain = alpacaApiService.getOptionChain(
-                ticker, shortStart, shortEnd, "call");
-            
-            // If no short leg options, try fallback to +7 days
-            if (shortChain.isEmpty()) {
-                shortExp = today.plusDays(7);
-                shortStart = shortExp.minusDays(2);
-                shortEnd = shortExp.plusDays(2);
-                shortChain = alpacaApiService.getOptionChain(ticker, shortStart, shortEnd, "call");
-                context.getLogger().log("No short leg options at +1 day, trying fallback at +7 days for " + ticker);
+            if (allOptions.isEmpty()) {
+                context.getLogger().log("No options data available for " + ticker);
+                return new OptionsLiquidityData(false, false, false);
             }
             
-            // Check long leg (~30 days)
-            LocalDate longExp = today.plusDays(30);
-            LocalDate longStart = longExp.minusDays(5);
-            LocalDate longEnd = longExp.plusDays(5);
-            
-            Map<String, OptionSnapshot> longChain = alpacaApiService.getOptionChain(
-                ticker, longStart, longEnd, "call");
-            
-            // If no long leg options, try fallback to +60 days
-            if (longChain.isEmpty()) {
-                longExp = today.plusDays(60);
-                longStart = longExp.minusDays(5);
-                longEnd = longExp.plusDays(5);
-                longChain = alpacaApiService.getOptionChain(ticker, longStart, longEnd, "call");
-                context.getLogger().log("No long leg options at +30 days, trying fallback at +60 days for " + ticker);
+            // Find short leg using reusable logic - earliest expiration after scan date
+            LocalDate shortExpiration = com.trading.common.OptionSelectionUtils.findShortLegExpirationFromOptionChain(allOptions, scanDate);
+            if (shortExpiration == null) {
+                context.getLogger().log("No suitable short leg expiration found for " + ticker);
+                return new OptionsLiquidityData(false, false, false);
             }
+            
+            // Filter to short leg options only
+            Map<String, OptionSnapshot> shortChain = allOptions.entrySet().stream()
+                .filter(entry -> entry.getKey().equals(shortExpiration.toString()))
+                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+            
+            // Find long leg using reusable logic - closest to 30 days from scan date
+            LocalDate longExpiration = com.trading.common.OptionSelectionUtils.findFarLegExpirationFromOptionChain(allOptions, scanDate, shortExpiration, 30);
+            if (longExpiration == null) {
+                context.getLogger().log("No suitable long leg expiration found for " + ticker);
+                return new OptionsLiquidityData(false, false, false);
+            }
+            
+            // Filter to long leg options only
+            Map<String, OptionSnapshot> longChain = allOptions.entrySet().stream()
+                .filter(entry -> entry.getKey().equals(longExpiration.toString()))
+                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
             
             // Check if we have at least one leg
             if (shortChain.isEmpty() && longChain.isEmpty()) {
@@ -126,10 +133,19 @@ public class LiquidityFilter {
                 return new OptionsLiquidityData(false, false, false);
             }
             
+            // Find the best common strike for calendar spread
+            double bestCommonStrike = OptionSelectionUtils.findBestCommonStrikeForCalendarSpreadFromOptionSnapshots(
+                shortChain, longChain, currentPrice);
+            
+            if (bestCommonStrike < 0) {
+                context.getLogger().log("No common strikes found between short and long leg chains for " + ticker);
+                return new OptionsLiquidityData(false, false, false);
+            }
+            
             // Evaluate short leg (if available)
             boolean shortTightSpreads = true, shortQuoteDepth = true, shortTradeActivity = true;
             if (!shortChain.isEmpty()) {
-                OptionSnapshot shortOption = commonUtils.findATMOption(shortChain, currentPrice);
+                OptionSnapshot shortOption = OptionSelectionUtils.findOptionForStrikeInOptionSnapshotChain(shortChain, bestCommonStrike);
                 if (shortOption != null) {
                     shortTightSpreads = shortOption.getBidAskSpreadPercent() <= BID_ASK_THRESHOLD;
                     shortQuoteDepth = shortOption.getTotalSize() >= QUOTE_DEPTH_THRESHOLD;
@@ -142,7 +158,7 @@ public class LiquidityFilter {
             // Evaluate long leg (if available)
             boolean longTightSpreads = true, longQuoteDepth = true, longTradeActivity = true;
             if (!longChain.isEmpty()) {
-                OptionSnapshot longOption = commonUtils.findATMOption(longChain, currentPrice);
+                OptionSnapshot longOption = OptionSelectionUtils.findOptionForStrikeInOptionSnapshotChain(longChain, bestCommonStrike);
                 if (longOption != null) {
                     longTightSpreads = longOption.getBidAskSpreadPercent() <= BID_ASK_THRESHOLD;
                     longQuoteDepth = longOption.getTotalSize() >= QUOTE_DEPTH_THRESHOLD;
@@ -178,18 +194,32 @@ public class LiquidityFilter {
     }
     
     /**
+     * Get option chain for a specific leg with flexible date range
+     * @param ticker Stock ticker
+     * @param baseDate Base date for calculation
+     * @param minDays Minimum days from base date
+     * @param maxDays Maximum days from base date
+     * @param context Lambda context
+     * @return Map of option snapshots by expiration
+     */
+    private Map<String, OptionSnapshot> getOptionChainForLeg(String ticker, LocalDate baseDate, 
+                                                           int minDays, int maxDays, Context context) {
+        return commonUtils.getOptionChainForDateRange(ticker, baseDate, minDays, maxDays, "call", credentials, context);
+    }
+    
+    /**
      * Check daily trade activity for an option
      */
     private boolean checkDailyTradeActivity(String ticker, String optionSymbol, Context context) {
         try {
-            LocalDate today = LocalDate.now();
+            LocalDate today = LocalDate.now(ZoneId.of("America/New_York"));
             LocalDate yesterday = today.minusDays(1);
             
-            List<AlpacaApiService.OptionTrade> trades = alpacaApiService.getOptionHistoricalTrades(
-                List.of(optionSymbol), yesterday, today);
+            List<OptionTrade> trades = AlpacaHttpClient.getOptionHistoricalTrades(
+                List.of(optionSymbol), yesterday, today, credentials);
             
             long totalTrades = trades.stream()
-                .mapToLong(AlpacaApiService.OptionTrade::getSize)
+                .mapToLong(OptionTrade::getSize)
                 .sum();
             
             boolean hasActivity = totalTrades >= MIN_DAILY_OPTION_TRADES;
@@ -209,14 +239,14 @@ public class LiquidityFilter {
     private StockData getRealStockData(String ticker, Context context) {
         try {
             // Get latest trade for current price and volume
-            AlpacaApiService.LatestTrade latestTrade = alpacaApiService.getLatestTrade(ticker);
+            LatestTrade latestTrade = AlpacaHttpClient.getLatestTrade(ticker, credentials);
             if (latestTrade == null) {
                 context.getLogger().log("No trade data available for: " + ticker);
                 return null;
             }
             
             // Get historical data for calculations
-            List<AlpacaApiService.HistoricalBar> historicalBars = alpacaApiService.getHistoricalBars(ticker, 90);
+            List<HistoricalBar> historicalBars = AlpacaHttpClient.getHistoricalBars(ticker, 90, credentials);
             if (historicalBars == null || historicalBars.isEmpty()) {
                 context.getLogger().log("No historical data available for: " + ticker);
                 return null;
@@ -237,7 +267,7 @@ public class LiquidityFilter {
             // Calculate term structure slope
             double termSlope = commonUtils.calculateTermStructureSlope(historicalBars, context);
             
-            return new StockData(ticker, averageVolume, rv30, iv30, termSlope);
+            return new StockData(ticker, latestTrade.getPrice(), averageVolume, rv30, iv30, termSlope);
             
         } catch (Exception e) {
             context.getLogger().log("Error getting real stock data for " + ticker + ": " + e.getMessage());
@@ -260,28 +290,4 @@ public class LiquidityFilter {
         }
     }
     
-    /**
-     * Data class for stock information
-     */
-    private static class StockData {
-        private final String ticker;
-        private final double averageVolume;
-        private final double rv30;
-        private final double iv30;
-        private final double termStructureSlope;
-        
-        public StockData(String ticker, double averageVolume, double rv30, double iv30, double termStructureSlope) {
-            this.ticker = ticker;
-            this.averageVolume = averageVolume;
-            this.rv30 = rv30;
-            this.iv30 = iv30;
-            this.termStructureSlope = termStructureSlope;
-        }
-        
-        public String getTicker() { return ticker; }
-        public double getAverageVolume() { return averageVolume; }
-        public double getRv30() { return rv30; }
-        public double getIv30() { return iv30; }
-        public double getTermStructureSlope() { return termStructureSlope; }
-    }
 }

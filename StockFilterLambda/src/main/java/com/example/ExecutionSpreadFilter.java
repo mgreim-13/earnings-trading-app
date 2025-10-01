@@ -1,9 +1,12 @@
 package com.example;
 
 import com.amazonaws.services.lambda.runtime.Context;
-import com.example.AlpacaApiService.OptionSnapshot;
+import com.trading.common.models.OptionSnapshot;
+import com.trading.common.OptionSelectionUtils;
+import com.trading.common.models.AlpacaCredentials;
 
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.Map;
 
 /**
@@ -12,14 +15,14 @@ import java.util.Map;
  */
 public class ExecutionSpreadFilter {
     
-    private final AlpacaApiService alpacaApiService;
+    private final AlpacaCredentials credentials;
     private final StockFilterCommonUtils commonUtils;
     
     // Thresholds
     private final double MAX_DEBIT_TO_PRICE_RATIO;
     
-    public ExecutionSpreadFilter(AlpacaApiService alpacaApiService, StockFilterCommonUtils commonUtils) {
-        this.alpacaApiService = alpacaApiService;
+    public ExecutionSpreadFilter(AlpacaCredentials credentials, StockFilterCommonUtils commonUtils) {
+        this.credentials = credentials;
         this.commonUtils = commonUtils;
         
         // Load thresholds from environment
@@ -43,11 +46,13 @@ public class ExecutionSpreadFilter {
             }
             
             // Validate bid/ask spreads
-            double shortMid = validateBidAsk(spreadQuotes.shortBid, spreadQuotes.shortAsk, ticker + " short call", context);
-            double longMid = validateBidAsk(spreadQuotes.longBid, spreadQuotes.longAsk, ticker + " long call", context);
+            double shortMid = OptionSelectionUtils.validateBidAsk(spreadQuotes.shortBid, spreadQuotes.shortAsk);
+            double longMid = OptionSelectionUtils.validateBidAsk(spreadQuotes.longBid, spreadQuotes.longAsk);
             if (shortMid < 0 || longMid < 0) {
                 return new FilterResult("ExecutionSpread", false, 0);
             }
+            
+            // Note: Strike matching is guaranteed by the new common strike logic in getSpreadQuotes()
             
             double netDebit = spreadQuotes.longAsk - spreadQuotes.shortBid;
             
@@ -55,12 +60,16 @@ public class ExecutionSpreadFilter {
             double dynamicThreshold = Math.min(MAX_DEBIT_TO_PRICE_RATIO, 0.1 / currentPrice);
             double debitToPriceRatio = netDebit / currentPrice;
             boolean reasonableDebit = debitToPriceRatio <= dynamicThreshold;
-            boolean positiveTheta = spreadQuotes.shortTheta > 0;
-            boolean passes = reasonableDebit && positiveTheta;
+            
+            // For calendar spreads, check net theta (long theta - short theta) > 0
+            // This ensures the long option has less negative theta (slower time decay) than the short option
+            double netTheta = spreadQuotes.longTheta - spreadQuotes.shortTheta;
+            boolean positiveNetTheta = netTheta > 0;
+            boolean passes = reasonableDebit && positiveNetTheta;
             
             int score = passes ? 3 : 0;
-            String reason = String.format("debit=%.2f, price=%.2f, debit/price=%.3f (threshold=%.3f), theta=%.3f", 
-                netDebit, currentPrice, debitToPriceRatio, dynamicThreshold, spreadQuotes.shortTheta);
+            String reason = String.format("debit=%.2f, price=%.2f, debit/price=%.3f (threshold=%.3f), strike=%.2f, net_theta=%.3f (long=%.3f, short=%.3f)", 
+                netDebit, currentPrice, debitToPriceRatio, dynamicThreshold, spreadQuotes.shortStrike, netTheta, spreadQuotes.longTheta, spreadQuotes.shortTheta);
             
             context.getLogger().log(ticker + " execution spread: " + reason + " (" + passes + ")");
             
@@ -73,46 +82,85 @@ public class ExecutionSpreadFilter {
     }
     
     /**
-     * Get quotes for calendar spread legs using actual earnings date with fallbacks
+     * Get quotes for calendar spread legs using consistent option selection
+     * Uses scan date as base date - all filters find the same options
+     * This accounts for both BMO and AMC earnings calls since scan runs the day before earnings
+     * Uses common strike logic to ensure both legs have the same strike price
      */
     private SpreadQuotes getSpreadQuotes(String ticker, LocalDate earningsDate, double currentPrice, Context context) {
         try {
-            // Get short leg quotes - find shortest available expiration between +1 and +7 days
-            Map<String, OptionSnapshot> shortChain = alpacaApiService.getOptionChain(
-                ticker, earningsDate.plusDays(1), earningsDate.plusDays(7), "call");
-            OptionSnapshot shortOption = commonUtils.findShortestExpirationATMOption(shortChain, currentPrice);
+            // Use scan date (current date) as base date - all filters find the same options
+            // This works for both BMO (expires on earnings day) and AMC (expires day after earnings)
+            LocalDate scanDate = LocalDate.now(ZoneId.of("America/New_York")); // Scan date = day before earnings
             
-            if (shortOption == null) {
-                context.getLogger().log("No short leg option found for " + ticker + " between " + 
-                    earningsDate.plusDays(1) + " and " + earningsDate.plusDays(7));
-            } else {
-                // Extract the actual expiration date from the option symbol or use the found option
-                context.getLogger().log("Found short leg option for " + ticker + " at shortest available expiration");
-            }
+            // Get wide range of options (1-60 days) to find proper legs
+            Map<String, OptionSnapshot> allOptions = commonUtils.getOptionChainForDateRange(
+                ticker, scanDate, 1, 60, "call", credentials, context);
             
-            if (shortOption == null) {
-                context.getLogger().log("No short leg option found for " + ticker + " even with fallback");
+            if (allOptions.isEmpty()) {
+                context.getLogger().log("No options data available for " + ticker);
                 return null;
             }
             
-            // Get long leg quotes - find shortest available expiration between +26 and +40 days
-            Map<String, OptionSnapshot> longChain = alpacaApiService.getOptionChain(
-                ticker, earningsDate.plusDays(26), earningsDate.plusDays(40), "call");
-            OptionSnapshot longOption = commonUtils.findShortestExpirationATMOption(longChain, currentPrice);
-            
-            if (longOption == null) {
-                context.getLogger().log("No long leg option found for " + ticker + " between " + 
-                    earningsDate.plusDays(26) + " and " + earningsDate.plusDays(40));
-            } else {
-                context.getLogger().log("Found long leg option for " + ticker + " at shortest available expiration");
-            }
-            
-            if (longOption == null) {
-                context.getLogger().log("No long leg option found for " + ticker + " even with fallback");
+            // Find short leg using reusable logic - earliest expiration after scan date
+            LocalDate shortExpiration = com.trading.common.OptionSelectionUtils.findShortLegExpirationFromOptionChain(allOptions, scanDate);
+            if (shortExpiration == null) {
+                context.getLogger().log("No suitable short leg expiration found for " + ticker);
                 return null;
             }
             
-            context.getLogger().log(ticker + " spread quotes: found both short and long leg options");
+            // Filter to short leg options only
+            Map<String, OptionSnapshot> shortChain = allOptions.entrySet().stream()
+                .filter(entry -> entry.getKey().equals(shortExpiration.toString()))
+                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+            
+            if (shortChain.isEmpty()) {
+                context.getLogger().log("No short leg options found for " + ticker + " at expiration " + shortExpiration);
+                return null;
+            }
+            
+            // Find long leg using reusable logic - closest to 30 days from scan date
+            LocalDate longExpiration = com.trading.common.OptionSelectionUtils.findFarLegExpirationFromOptionChain(allOptions, scanDate, shortExpiration, 30);
+            if (longExpiration == null) {
+                context.getLogger().log("No suitable long leg expiration found for " + ticker);
+                return null;
+            }
+            
+            // Filter to long leg options only
+            Map<String, OptionSnapshot> longChain = allOptions.entrySet().stream()
+                .filter(entry -> entry.getKey().equals(longExpiration.toString()))
+                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+            
+            if (longChain.isEmpty()) {
+                context.getLogger().log("No long leg options found for " + ticker + " at expiration " + longExpiration);
+                return null;
+            }
+            
+            // Find the best common strike between both chains
+            double bestCommonStrike = OptionSelectionUtils.findBestCommonStrikeForCalendarSpreadFromOptionSnapshots(
+                shortChain, longChain, currentPrice);
+            
+            if (bestCommonStrike < 0) {
+                context.getLogger().log("No common strikes found between short and long leg chains for " + ticker);
+                return null;
+            }
+            
+            // Find options for the common strike
+            OptionSnapshot shortOption = OptionSelectionUtils.findOptionForStrikeInOptionSnapshotChain(shortChain, bestCommonStrike);
+            OptionSnapshot longOption = OptionSelectionUtils.findOptionForStrikeInOptionSnapshotChain(longChain, bestCommonStrike);
+            
+            if (shortOption == null) {
+                context.getLogger().log("No short leg option found for strike " + bestCommonStrike + " for " + ticker);
+                return null;
+            }
+            
+            if (longOption == null) {
+                context.getLogger().log("No long leg option found for strike " + bestCommonStrike + " for " + ticker);
+                return null;
+            }
+            
+            context.getLogger().log(ticker + " calendar spread: found common strike " + 
+                String.format("%.2f", bestCommonStrike) + " for both legs");
             
             return new SpreadQuotes(
                 shortOption.getBid(), shortOption.getAsk(), shortOption.getStrike(), shortOption.getTheta(),
@@ -125,33 +173,6 @@ public class ExecutionSpreadFilter {
         }
     }
     
-    /**
-     * Validate bid/ask spreads similar to EarningsStabilityFilter
-     */
-    private double validateBidAsk(double bid, double ask, String optionName, Context context) {
-        if (bid <= 0 || ask <= 0) {
-            context.getLogger().log("Invalid " + optionName + " bid/ask: bid=" + bid + ", ask=" + ask);
-            return -1;
-        }
-        
-        if (ask < bid) {
-            context.getLogger().log("Invalid " + optionName + " spread: ask=" + ask + " < bid=" + bid);
-            return -1;
-        }
-        
-        double mid = (bid + ask) / 2.0;
-        double spread = ask - bid;
-        double spreadPercent = (spread / mid) * 100;
-        
-        // Reject if spread is too wide (>20%) or mid price is too low (<$0.10)
-        if (spreadPercent > 20.0 || mid < 0.10) {
-            context.getLogger().log("Rejected " + optionName + ": spread=" + String.format("%.1f", spreadPercent) + 
-                "%, mid=" + String.format("%.2f", mid));
-            return -1;
-        }
-        
-        return mid;
-    }
     
     /**
      * Data class for spread quotes

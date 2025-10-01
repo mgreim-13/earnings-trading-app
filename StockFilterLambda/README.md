@@ -162,7 +162,7 @@ The function uses the following environment variables:
 
 - `EARNINGS_TABLE`: Name of the earnings DynamoDB table
 - `FILTERED_TABLE`: Name of the filtered tickers DynamoDB table
-- `VOLUME_THRESHOLD`: Minimum average daily volume (default: 1,000,000)
+- `VOLUME_THRESHOLD`: Minimum average daily volume (default: 2,000,000)
 - `RATIO_THRESHOLD`: Minimum IV30/RV30 ratio (default: 1.2)
 - `SLOPE_THRESHOLD`: Minimum term structure slope (default: 0.0)
 
@@ -173,7 +173,7 @@ The function uses the following environment variables:
 You can customize the filtering criteria by setting environment variables:
 
 ```bash
-export VOLUME_THRESHOLD=2000000    # 2M shares minimum
+export VOLUME_THRESHOLD=2000000    # 2M shares minimum (improved liquidity)
 export RATIO_THRESHOLD=1.5         # Higher IV/RV ratio
 export SLOPE_THRESHOLD=0.05        # Positive slope requirement
 ```

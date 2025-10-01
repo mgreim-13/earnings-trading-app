@@ -6,11 +6,12 @@ import com.amazonaws.services.lambda.runtime.events.APIGatewayProxyRequestEvent;
 import com.amazonaws.services.lambda.runtime.events.APIGatewayProxyResponseEvent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.trading.common.TradingCommonUtils;
+import com.trading.common.JsonUtils;
 import com.trading.common.TradingErrorHandler;
+import com.trading.common.AlpacaHttpClient;
+import com.trading.common.JsonParsingUtils;
 import com.trading.common.models.AlpacaCredentials;
-import okhttp3.*;
 
-import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -19,6 +20,8 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 /**
@@ -32,12 +35,21 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
 
     private static final String SECRET_NAME = System.getenv("ALPACA_SECRET_NAME");
     private static final String PAPER_TRADING = System.getenv("PAPER_TRADING");
-    private static final String REGION = System.getenv("AWS_REGION");
     
-    private static final ExecutorService executorService = Executors.newFixedThreadPool(10);
+    private static volatile ExecutorService executorService;
     
-    private OkHttpClient httpClient;
     private AlpacaCredentials credentials;
+    
+    private static ExecutorService getExecutorService() {
+        if (executorService == null || executorService.isShutdown()) {
+            synchronized (InitiateExitTradesLambda.class) {
+                if (executorService == null || executorService.isShutdown()) {
+                    executorService = Executors.newFixedThreadPool(10);
+                }
+            }
+        }
+        return executorService;
+    }
     
     // Exit criteria - ALL positions should be closed at 9:45 AM EST
     private static final int EXIT_HOUR = 9; // 9 AM EST
@@ -90,6 +102,8 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
             // Process each calendar spread - ALL calendar spreads should be closed at 9:45 AM EST
             List<CompletableFuture<Void>> exitFutures = new ArrayList<>();
             int processedGroups = 0;
+            final AtomicInteger successfulExits = new AtomicInteger(0);
+            final AtomicInteger failedExits = new AtomicInteger(0);
             
             for (Map.Entry<String, List<Position>> entry : calendarSpreadGroups.entrySet()) {
                 String groupKey = entry.getKey();
@@ -98,15 +112,19 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
                 CompletableFuture<Void> exitFuture = CompletableFuture.runAsync(() -> {
                     try {
                         log.info("Closing calendar spread: {} at 9:45 AM EST", groupKey);
+                        
                         if (submitExitOrder(positions)) {
                             log.info("Successfully submitted exit order for calendar spread: {}", groupKey);
+                            successfulExits.incrementAndGet();
                         } else {
                             log.error("Failed to submit exit order for calendar spread: {}", groupKey);
+                            failedExits.incrementAndGet();
                         }
                     } catch (Exception e) {
                         log.error("Error processing calendar spread {}: {}", groupKey, e.getMessage(), e);
+                        failedExits.incrementAndGet();
                     }
-                }, executorService);
+                }, getExecutorService());
                 
                 exitFutures.add(exitFuture);
                 processedGroups++;
@@ -115,12 +133,29 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
             // Wait for all exit operations to complete
             CompletableFuture.allOf(exitFutures.toArray(new CompletableFuture[0])).join();
             
-            log.info("InitiateExitTradesLambda execution completed. Processed {} calendar spreads", processedGroups);
-            return createSuccessResponse(String.format("Processed %d calendar spreads", processedGroups));
+            log.info("InitiateExitTradesLambda execution completed. Processed {} calendar spreads, " +
+                "successful: {}, failed: {}", processedGroups, successfulExits.get(), failedExits.get());
+            
+            return createSuccessResponse(String.format("Processed %d calendar spreads - successful: %d, failed: %d", 
+                processedGroups, successfulExits.get(), failedExits.get()));
             
         } catch (Exception e) {
             log.error("Fatal error in InitiateExitTradesLambda: {}", e.getMessage(), e);
             return createErrorResponse("Internal server error: " + e.getMessage());
+        } finally {
+            // Shutdown executor service to prevent resource leaks
+            ExecutorService exec = executorService;
+            if (exec != null && !exec.isShutdown()) {
+                exec.shutdown();
+                try {
+                    if (!exec.awaitTermination(5, TimeUnit.SECONDS)) {
+                        exec.shutdownNow();
+                    }
+                } catch (InterruptedException e) {
+                    exec.shutdownNow();
+                    Thread.currentThread().interrupt();
+                }
+            }
         }
     }
     
@@ -129,12 +164,7 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
      */
     private void initializeClients() {
         try {
-            // Initialize HTTP client
-            httpClient = new OkHttpClient.Builder()
-                    .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                    .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                    .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                    .build();
+            // HTTP client is now handled by AlpacaHttpClient
             
             // Get Alpaca API credentials
             credentials = TradingCommonUtils.getAlpacaCredentials(SECRET_NAME);
@@ -153,36 +183,24 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
      */
     private List<Position> fetchHeldPositions() {
         try {
-            Request request = new Request.Builder()
-                    .url(credentials.getBaseUrl() + "/v2/positions")
-                    .addHeader("APCA-API-KEY-ID", credentials.getKeyId())
-                    .addHeader("APCA-API-SECRET-KEY", credentials.getSecretKey())
-                    .build();
+            String responseBody = AlpacaHttpClient.getAlpacaTrading("/positions", credentials);
+            JsonNode positionsArray = JsonUtils.parseJson(responseBody);
             
-            try (Response response = httpClient.newCall(request).execute()) {
-                if (!response.isSuccessful()) {
-                    throw new RuntimeException("Failed to fetch positions: " + response.code() + " " + response.message());
-                }
-                
-                String responseBody = response.body().string();
-                JsonNode positionsArray = TradingCommonUtils.parseJson(responseBody);
-                
-                List<Position> positions = new ArrayList<>();
-                for (JsonNode positionNode : positionsArray) {
-                    Position position = new Position();
-                    position.setSymbol(positionNode.get("symbol").asText());
-                    position.setQty(new BigDecimal(positionNode.get("qty").asText()));
-                    position.setCostBasis(positionNode.get("cost_basis").asText());
-                    position.setUnrealizedPl(positionNode.get("unrealized_pl").asText());
-                    position.setSide(positionNode.get("side").asText());
-                    position.setAssetClass(positionNode.get("asset_class").asText());
-                    positions.add(position);
-                }
-                
-                log.info("Successfully fetched {} positions from Alpaca", positions.size());
-                return positions;
+            List<Position> positions = new ArrayList<>();
+            for (JsonNode positionNode : positionsArray) {
+                Position position = new Position();
+                position.setSymbol(positionNode.get("symbol").asText());
+                position.setQty(new BigDecimal(positionNode.get("qty").asText()));
+                position.setCostBasis(positionNode.get("cost_basis").asText());
+                position.setUnrealizedPl(positionNode.get("unrealized_pl").asText());
+                position.setSide(positionNode.get("side").asText());
+                position.setAssetClass(positionNode.get("asset_class").asText());
+                positions.add(position);
             }
-        } catch (IOException e) {
+            
+            log.info("Successfully fetched {} positions from Alpaca", positions.size());
+            return positions;
+        } catch (Exception e) {
             log.error("Failed to fetch positions from Alpaca API: {}", e.getMessage(), e);
             throw new RuntimeException("Failed to fetch positions", e);
         }
@@ -308,8 +326,8 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
             log.info("Calendar spread: near-term={}, far-term={}", nearSymbol, farSymbol);
             
             // Use same API endpoint and parsing as InitiateTradesLambda
-            String url = "https://data.alpaca.markets/v1beta1/options/quotes/latest?symbols=" + nearSymbol + "," + farSymbol + "&feed=indicative";
-            String responseBody = makeHttpRequest(url, credentials.getKeyId(), credentials.getSecretKey(), "GET", null);
+            String endpoint = "/options/quotes/latest?symbols=" + nearSymbol + "," + farSymbol + "&feed=opra";
+            String responseBody = AlpacaHttpClient.getAlpacaOptions(endpoint, credentials);
             JsonNode quotes = parseJson(responseBody).get("quotes");
             
             if (quotes == null || !quotes.isObject()) {
@@ -325,8 +343,8 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
             }
             
             // Use same price extraction methods as InitiateTradesLambda
-            double nearBid = getBidPrice(nearQuote);
-            double farAsk = getAskPrice(farQuote);
+            double nearBid = JsonParsingUtils.getBidPrice(nearQuote);
+            double farAsk = JsonParsingUtils.getAskPrice(farQuote);
             
             // Calculate credit: nearBid - farAsk (opposite of entry debit: farAsk - nearBid)
             double credit = Math.max(0.0, nearBid - farAsk);
@@ -427,31 +445,10 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
             mlegOrder.put("legs", legs);
             
             // Submit multi-leg order
-            String orderJson = TradingCommonUtils.toJson(mlegOrder);
-            RequestBody body = RequestBody.create(orderJson, MediaType.get("application/json"));
-            
-            Request request = new Request.Builder()
-                    .url(credentials.getBaseUrl() + "/v2/orders")
-                    .addHeader("APCA-API-KEY-ID", credentials.getKeyId())
-                    .addHeader("APCA-API-SECRET-KEY", credentials.getSecretKey())
-                    .addHeader("accept", "application/json")
-                    .addHeader("content-type", "application/json")
-                    .post(body)
-                    .build();
-            
-            try (Response response = httpClient.newCall(request).execute()) {
-                if (response.isSuccessful()) {
-                    String responseBody = response.body().string();
-                    log.info("Successfully submitted multi-leg exit order: {}", responseBody);
-                    return true;
-                } else {
-                    String errorBody = response.body().string();
-                    log.error("Failed to submit multi-leg order: {} {}", response.code(), errorBody);
-                    logToCloudWatch("MLEG_ORDER_SUBMISSION_FAILED", 
-                            String.format("Error: %s %s", response.code(), errorBody));
-                    return false;
-                }
-            }
+            String orderJson = JsonUtils.toJson(mlegOrder);
+            String responseBody = AlpacaHttpClient.postAlpacaTrading("/orders", orderJson, credentials);
+            log.info("Successfully submitted multi-leg exit order: {}", responseBody);
+            return true;
             
         } catch (Exception e) {
             log.error("Error submitting multi-leg exit order: {}", e.getMessage(), e);
@@ -562,7 +559,7 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
      * Check if market is currently open
      */
     private boolean isMarketOpen() {
-        return TradingCommonUtils.isMarketOpen(credentials.getKeyId(), credentials.getSecretKey());
+        return AlpacaHttpClient.isMarketOpen(credentials);
     }
     
     
@@ -582,77 +579,26 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
      */
     private JsonNode parseJson(String json) {
         try {
-            return TradingCommonUtils.parseJson(json);
+            return JsonUtils.parseJson(json);
         } catch (Exception e) {
             throw new RuntimeException("JSON parsing failed: " + e.getMessage(), e);
         }
     }
     
-    /**
-     * Make HTTP request (mirrors InitiateTradesLambda)
-     */
-    private String makeHttpRequest(String url, String apiKey, String secretKey, String method, String body) {
-        try {
-            Request.Builder requestBuilder = new Request.Builder().url(url);
-            
-            if ("GET".equals(method)) {
-                requestBuilder.get();
-            } else if ("POST".equals(method)) {
-                RequestBody requestBody = RequestBody.create(body, MediaType.get("application/json"));
-                requestBuilder.post(requestBody);
-            }
-            
-            Request request = requestBuilder
-                    .addHeader("APCA-API-KEY-ID", apiKey)
-                    .addHeader("APCA-API-SECRET-KEY", secretKey)
-                    .addHeader("accept", "application/json")
-                    .addHeader("content-type", "application/json")
-                    .build();
-            
-            try (Response response = httpClient.newCall(request).execute()) {
-                if (!response.isSuccessful()) {
-                    throw new RuntimeException("HTTP " + response.code() + ": " + response.body().string());
-                }
-                return response.body().string();
-            }
-        } catch (Exception e) {
-            throw new RuntimeException("HTTP request failed: " + e.getMessage(), e);
-        }
-    }
     
-    /**
-     * Get price from quote node (mirrors InitiateTradesLambda)
-     */
-    private double getPrice(JsonNode quote, String field) {
-        return quote.has(field) ? quote.get(field).asDouble() : 0.0;
-    }
-    
-    /**
-     * Get bid price (mirrors InitiateTradesLambda)
-     */
-    private double getBidPrice(JsonNode quote) {
-        return getPrice(quote, "bp");
-    }
-    
-    /**
-     * Get ask price (mirrors InitiateTradesLambda)
-     */
-    private double getAskPrice(JsonNode quote) {
-        return getPrice(quote, "ap");
-    }
     
     /**
      * Log error details to CloudWatch
      */
     private void logToCloudWatch(String errorType, String details) {
         Map<String, Object> errorLog = new HashMap<>();
-        errorLog.put("timestamp", LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME));
+        errorLog.put("timestamp", LocalDateTime.now(ZoneId.of("America/New_York")).format(DateTimeFormatter.ISO_LOCAL_DATE_TIME));
         errorLog.put("errorType", errorType);
         errorLog.put("details", details);
         errorLog.put("lambdaFunction", "InitiateExitTradesLambda");
         
         try {
-            String errorJson = TradingCommonUtils.toJson(errorLog);
+            String errorJson = JsonUtils.toJson(errorLog);
             log.error("CLOUDWATCH_ERROR_LOG: {}", errorJson);
         } catch (Exception e) {
             log.error("Failed to create error log JSON: {}", e.getMessage());
