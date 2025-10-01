@@ -1,10 +1,17 @@
 # TradingAWS - Automated Earnings Trading System
 
-A sophisticated AWS-based automated trading system that scans for earnings opportunities and executes debit calendar spread strategies using Alpaca Markets API and Finnhub data.
+A sophisticated AWS-based automated trading system that scans for earnings opportunities and executes debit calendar spread strategies using advanced financial filters and real-time market data.
 
 ## 🚀 Overview
 
-This system automates the entire earnings trading workflow from scanning potential stocks to executing and monitoring trades. It's built on AWS Lambda functions with EventBridge scheduling, DynamoDB for data storage, and CloudWatch for monitoring.
+This system automates the entire earnings trading workflow from scanning potential stocks to executing and monitoring trades. It uses a sophisticated **6-factor financial filtering system** to identify high-probability earnings trading opportunities and executes debit calendar spread strategies with built-in risk management.
+
+**Key Features:**
+- **Advanced Financial Filtering**: 6-factor gatekeeper system for stock selection
+- **Real-time Market Data**: Integration with Alpaca Markets and Finnhub APIs
+- **Automated Execution**: Debit calendar spread strategy with position sizing
+- **Risk Management**: Built-in position limits and monitoring
+- **Market Adaptation**: Automatic handling of early closure days and holidays
 
 ## 🏗️ Architecture
 
@@ -30,43 +37,104 @@ This system automates the entire earnings trading workflow from scanning potenti
 ## 📊 Trading Strategy
 
 ### **Debit Calendar Spread Strategy**
-- **Entry**: Trading session before earnings announcement
-- **Exit**: First trading session after earnings announcement
-- **Position Sizing**: 6% of portfolio equity per trade
-- **Risk Management**: Built-in position limits and monitoring
+The system executes **debit calendar spreads** - a sophisticated options strategy that profits from volatility crush after earnings announcements.
+
+**Strategy Details:**
+- **Entry**: Trading session before earnings announcement (3:45 PM EST)
+- **Exit**: First trading session after earnings announcement (9:45 AM EST)
+- **Position Sizing**: 6% of portfolio equity per trade (configurable)
+- **Strike Selection**: At-the-money (ATM) strikes for maximum liquidity
+- **Expiration Selection**: 
+  - Short leg: First expiration after earnings (typically 1-7 days)
+  - Long leg: ~30 days from earnings for time decay benefit
+
+**Why Calendar Spreads?**
+- **Volatility Crush**: Profits when IV drops after earnings
+- **Time Decay**: Long leg decays slower than short leg
+- **Limited Risk**: Maximum loss is the debit paid
+- **High Probability**: Benefits from predictable volatility patterns
+
+**Risk Management:**
+- **Position Limits**: Maximum 6% of portfolio per trade
+- **Diversification**: Multiple positions across different sectors
+- **Stop Loss**: Automatic exit at market open next day
+- **Monitoring**: Real-time position tracking and adjustment
 
 ### **Market Schedule Adaptation**
-The system automatically adapts to market conditions:
+The system automatically adapts to market conditions using MarketSchedulerLambda:
 
 **Normal Trading Days:**
-- Tables created: 3:25 PM EST
-- Earnings scan: 3:30 PM EST
-- Stock filtering: 3:35 PM EST
-- Trade execution: 3:45 PM EST
-- Position monitoring: 3:45:30-4:00 PM EST
-- Tables cleaned: 9:00 PM EST
+- **6:00 AM EST**: Market status check and rule configuration
+- **9:45 AM EST**: Exit all existing positions
+- **9:46-10:00 AM EST**: Monitor trades (every minute)
+- **3:25 PM EST**: Create DynamoDB tables
+- **3:30 PM EST**: Scan earnings calendar
+- **3:35 PM EST**: Filter stocks using 6-factor system
+- **3:45 PM EST**: Execute debit calendar spreads
+- **3:46-4:00 PM EST**: Monitor new positions (every minute)
+- **4:00 PM EST**: Clean up DynamoDB tables
 
 **Early Closure Days:**
-- Tables created: 12:25 PM EST
-- Earnings scan: 12:30 PM EST
-- Stock filtering: 12:35 PM EST
-- Trade execution: 12:45 PM EST
-- Position monitoring: 12:45:30-1:00 PM EST
-- Tables cleaned: 6:00 PM EST
+- **6:00 AM EST**: Market status check and rule configuration
+- **9:45 AM EST**: Exit all existing positions
+- **9:46-10:00 AM EST**: Monitor trades (every minute)
+- **12:25 PM EST**: Create DynamoDB tables
+- **12:30 PM EST**: Scan earnings calendar
+- **12:35 PM EST**: Filter stocks using 6-factor system
+- **12:45 PM EST**: Execute debit calendar spreads
+- **12:46-1:00 PM EST**: Monitor new positions (every minute)
+- **1:00 PM EST**: Clean up DynamoDB tables
 
-## 🔍 Stock Filtering System
+**Holiday Detection:**
+- **Finnhub API**: Real-time market holiday detection
+- **Hardcoded Fallback**: Common US market holidays
+- **Automatic Skip**: All trading activities disabled on holidays
 
-The StockFilterLambda uses a sophisticated **6-factor filtering system**:
+## 🔍 Financial Filtering System
 
-### **Core Quality Filters**
-1. **Volume Filter**: Minimum 1M average daily volume
-2. **IV30/RV30 Ratio**: Implied vs realized volatility comparison (>1.2)
-3. **Term Structure Slope**: Volatility curve analysis (backwardation detection)
+The StockFilterLambda uses a sophisticated **6-factor gatekeeper system** that evaluates stocks through multiple financial criteria. Each filter acts as a gatekeeper - if any filter fails, the stock is rejected.
 
-### **Earnings-Specific Filters**
-4. **Historical Volatility Crush**: 70%+ of past earnings show 15%+ volatility crush
-5. **Historical Earnings Stability**: Average post-earnings move ≤5%
-6. **Options Liquidity**: Multi-layered liquidity assessment
+### **Gatekeeper 1: Liquidity Filter** 🏊‍♂️
+**Purpose**: Ensures sufficient trading volume and options liquidity
+- **Average Daily Volume**: Minimum 2M shares (configurable)
+- **Stock Price Range**: $20-$1000 for optimal liquidity
+- **Options Spread Analysis**: Tight bid-ask spreads required
+- **Quote Depth**: Minimum 100 contracts on each side
+- **Trade Activity**: Recent options trading activity required
+
+### **Gatekeeper 2: IV Ratio Filter** 📊
+**Purpose**: Identifies stocks with elevated implied volatility vs historical volatility
+- **IV30/RV30 Ratio**: Must be > 1.25 (25% premium over realized volatility)
+- **Data Source**: 30-day implied volatility vs 30-day realized volatility
+- **Rationale**: Higher IV suggests market expects significant price movement
+
+### **Gatekeeper 3: Term Structure Filter** 📈
+**Purpose**: Detects volatility backwardation (earnings week IV > longer-term IV)
+- **Backwardation Detection**: Earnings week IV > max(IV30, IV60)
+- **Minimum Slope**: 0.025 (2.5% backwardation required)
+- **Rationale**: Backwardation indicates market expects earnings volatility
+
+### **Gatekeeper 4: Execution Spread Filter** 💰
+**Purpose**: Ensures profitable trade execution with reasonable spreads
+- **Debit-to-Price Ratio**: Maximum 5% of stock price
+- **Dynamic Threshold**: Based on stock price and volatility
+- **Net Theta Analysis**: Positive theta for time decay benefit
+- **Strike Selection**: ATM strikes for maximum liquidity
+
+### **Optional Filters (Position Sizing)**
+These filters don't reject stocks but influence position sizing:
+
+### **Earnings Stability Filter** 🎯
+**Purpose**: Historical earnings move analysis
+- **Stability Threshold**: Average post-earnings move ≤ 6%
+- **Historical Analysis**: Past 8 quarters of earnings data
+- **Rationale**: Predictable earnings moves reduce risk
+
+### **Volatility Crush Filter** 💥
+**Purpose**: Historical volatility crush analysis
+- **Crush Percentage**: 60%+ of past earnings show 20%+ crush
+- **Threshold Analysis**: 80% of earnings must meet crush criteria
+- **Rationale**: Consistent volatility crush indicates profitable opportunities
 
 ### **Filter Configuration**
 All filters are configurable via environment variables:
@@ -74,27 +142,72 @@ All filters are configurable via environment variables:
 ```yaml
 Environment:
   Variables:
-    VOLUME_THRESHOLD: '2000000'
-    RATIO_THRESHOLD: '1.2'
-    SLOPE_THRESHOLD: '-0.00406'
-    MIN_AVERAGE_VOLUME: '500000'
-    VOLATILITY_CRUSH_THRESHOLD: '0.85'
-    EARNINGS_STABILITY_THRESHOLD: '0.05'
-    MIN_STOCK_PRICE: '20.0'
-    MAX_STOCK_PRICE: '1000.0'
+    # Liquidity Filter
+    VOLUME_THRESHOLD: '2000000'           # Minimum daily volume
+    MIN_STOCK_PRICE: '20.0'               # Minimum stock price
+    MAX_STOCK_PRICE: '1000.0'             # Maximum stock price
+    BID_ASK_THRESHOLD: '0.08'             # Maximum bid-ask spread
+    QUOTE_DEPTH_THRESHOLD: '100'          # Minimum quote depth
+    
+    # IV Ratio Filter
+    IV_RATIO_THRESHOLD: '1.25'            # Minimum IV30/RV30 ratio
+    
+    # Term Structure Filter
+    SLOPE_THRESHOLD: '0.025'              # Minimum backwardation
+    
+    # Execution Spread Filter
+    MAX_DEBIT_TO_PRICE_RATIO: '0.05'      # Maximum debit/price ratio
+    
+    # Earnings Stability Filter
+    EARNINGS_STABILITY_THRESHOLD: '0.06'  # Maximum average move
+    STABILITY_THRESHOLD: '0.55'           # Minimum stability score
+    
+    # Volatility Crush Filter
+    VOLATILITY_CRUSH_THRESHOLD: '0.80'    # Minimum crush percentage
+    CRUSH_PERCENTAGE: '0.60'              # Minimum historical crush
+```
+
+### **Filter Logic Flow**
+```
+Stock Input
+    ↓
+Gatekeeper 1: Liquidity Check
+    ↓ (PASS)
+Gatekeeper 2: IV Ratio Check
+    ↓ (PASS)
+Gatekeeper 3: Term Structure Check
+    ↓ (PASS)
+Gatekeeper 4: Execution Spread Check
+    ↓ (PASS)
+Position Sizing Calculation
+    ↓
+Final Recommendation
 ```
 
 ## 🛠️ Technical Implementation
 
-### **Data Sources**
-- **Alpaca Markets API**: Historical bars, quotes, trades, account data
-- **Finnhub API**: Earnings calendar, historical earnings data, company financials
+### **Data Sources & APIs**
 
-### **Key Features**
+**Alpaca Markets API Integration:**
+- **Market Data**: Real-time and historical stock prices, options quotes
+- **Options Chain**: Complete options data with strikes, expirations, Greeks
+- **Account Data**: Portfolio equity, positions, order history
+- **Trading API**: Order submission, modification, and cancellation
+- **Rate Limiting**: Built-in retry logic with exponential backoff
+
+**Finnhub API Integration:**
+- **Earnings Calendar**: Upcoming earnings announcements and dates
+- **Historical Earnings**: Past earnings data for analysis
+- **Company Fundamentals**: Financial metrics and ratios
+- **Market Holidays**: Real-time market closure detection
+
+### **Key Technical Features**
 - **Historical Data Ordering**: Explicit sorting ensures correct chronological analysis
 - **Thread Pool Management**: Proper cleanup prevents resource leaks
 - **Error Handling**: Comprehensive error reporting and logging
 - **Environment Configuration**: All parameters configurable via environment variables
+- **Caching System**: Intelligent caching reduces API calls and improves performance
+- **Rate Limiting**: Respects API limits with automatic retry mechanisms
 
 ### **DynamoDB Tables**
 - **dev-earnings-data**: Temporary storage for earnings calendar data (30min TTL)
@@ -140,18 +253,42 @@ aws cloudformation update-stack \
 ## 📈 Monitoring & Alerts
 
 ### **CloudWatch Alarms**
-- Lambda function duration monitoring
-- Error rate tracking
-- Custom metrics for trading performance
+- **Duration Monitoring**: Lambda execution time alerts
+- **Error Rate Tracking**: Function failure rate monitoring
+- **Custom Metrics**: Trading performance and success rates
+- **Memory Usage**: Lambda memory consumption alerts
 
 ### **Budget Alerts**
-- Email notifications at 80% and 100% of $5/month budget
-- Forecasted spending alerts
+- **Email Notifications**: 80% and 100% of $5/month budget
+- **Forecasted Spending**: Predictive cost analysis
+- **Cost Breakdown**: Per-service cost tracking
 
-### **Logging**
-- Comprehensive logging across all Lambda functions
-- Error tracking and debugging information
-- Performance metrics
+### **Comprehensive Logging**
+The system provides detailed logging for complete traceability:
+
+**Stock Filter Logging:**
+- Individual filter pass/fail results
+- Detailed financial metrics (IV ratios, spreads, volumes)
+- Filter configuration and thresholds
+- Cache hit/miss statistics
+
+**Trading Execution Logging:**
+- Order submission success/failure
+- Position sizing calculations
+- Account equity and risk metrics
+- API response times and errors
+
+**Monitoring Logging:**
+- Position status updates
+- Order conversion to market orders
+- Exit strategy execution
+- Real-time P&L tracking
+
+**Debug Information:**
+- API rate limiting and retries
+- Data validation errors
+- Network timeouts and failures
+- Performance bottlenecks
 
 ## 🔒 Security Features
 
@@ -237,6 +374,9 @@ For issues and questions:
 - **v1.1.0**: Enhanced stock filtering with earnings-specific criteria
 - **v1.2.0**: Improved error handling and monitoring
 - **v1.3.0**: Added budget protection and cost optimization
+- **v1.4.0**: Comprehensive financial filtering system with 6-factor gatekeeper
+- **v1.5.0**: Java 21 migration and cron expression fixes
+- **v1.6.0**: Enhanced logging and debugging capabilities
 
 ---
 
