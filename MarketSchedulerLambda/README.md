@@ -8,6 +8,7 @@ This Lambda function provides conditional scheduling for all trading-related Lam
 - **Early Closure Detection**: Handles early closure days (Black Friday, Christmas Eve, etc.)
 - **Conditional Triggering**: Only triggers other lambdas when market is open
 - **Comprehensive Scheduling**: Manages all trading lambda schedules in one place
+- **DynamoDB Management**: Creates and cleans up temporary tables for trading data
 
 ## Schedule Configuration
 
@@ -34,6 +35,18 @@ This Lambda function provides conditional scheduling for all trading-related Lam
 ### InitiateExitTradesLambda
 - **All Market Days**: 9:45 AM EST (M-F, non-holidays and early closure days)
 - **Holidays**: Skipped
+
+## DynamoDB Table Management
+
+### Table Creation
+- **Normal Days**: 3:25 PM EST (5 minutes before ScanEarningsLambda)
+- **Early Closure Days**: 12:25 PM EST (5 minutes before ScanEarningsLambda)
+- **Tables Created**: `earnings-table`, `filtered-tickers-table`
+
+### Table Cleanup
+- **Normal Days**: 4:00 PM EST (30 minutes after ScanEarningsLambda)
+- **Early Closure Days**: 1:00 PM EST (30 minutes after ScanEarningsLambda)
+- **Cleanup Method**: Complete table deletion (no TTL)
 
 ## Environment Variables
 

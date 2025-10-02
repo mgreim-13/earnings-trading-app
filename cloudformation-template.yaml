@@ -91,7 +91,6 @@ Resources:
                   - dynamodb:DeleteItem
                   - dynamodb:BatchWriteItem
                   - dynamodb:DeleteTable
-                  - dynamodb:UpdateTimeToLive
                 Resource:
                   - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Environment}-*'
                   - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Environment}-*/index/*'

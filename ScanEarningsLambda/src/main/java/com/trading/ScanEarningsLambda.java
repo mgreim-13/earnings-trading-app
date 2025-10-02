@@ -222,15 +222,11 @@ public class ScanEarningsLambda implements RequestHandler<Map<String, Object>, S
 
             List<WriteRequest> writeRequests = batch.stream()
                 .map(record -> {
-                    // Calculate TTL: current time + 30 minutes
-                    long ttl = System.currentTimeMillis() / 1000 + (30 * 60); // 30 minutes from now
-                    
                     Map<String, AttributeValue> item = Map.of(
                         "scanDate", AttributeValue.builder().s(scanDateStr).build(),
                         "ticker", AttributeValue.builder().s(record.getTicker()).build(),
                         "earningsDate", AttributeValue.builder().s(record.getEarningsDate()).build(),
-                        "time", AttributeValue.builder().s(record.getTime().toUpperCase()).build(),
-                        "ttl", AttributeValue.builder().n(String.valueOf(ttl)).build()
+                        "time", AttributeValue.builder().s(record.getTime().toUpperCase()).build()
                     );
                     return WriteRequest.builder()
                         .putRequest(PutRequest.builder().item(item).build())

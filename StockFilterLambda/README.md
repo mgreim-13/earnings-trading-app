@@ -39,7 +39,7 @@ Step Functions → StockFilterLambda → DynamoDB (EarningsTable)
                       ↓
                  Proportional Portfolio Allocation (30% max)
                       ↓
-                 DynamoDB (FilteredTickersTable)
+                 DynamoDB (FilteredTickersTable - cleaned up at 4:00 PM EST)
 ```
 
 ## Prerequisites

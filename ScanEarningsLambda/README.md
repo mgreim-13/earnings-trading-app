@@ -6,7 +6,7 @@ A Java-based AWS Lambda function that fetches earnings data from Finnhub's API, 
 
 - **Local Market Status**: Determines market status using local calculation (no external API dependency)
 - **Earnings Data Processing**: Fetches and filters earnings data from Finnhub API
-- **DynamoDB Integration**: Efficiently stores earnings data with batch writes
+- **DynamoDB Integration**: Efficiently stores earnings data with batch writes (tables cleaned up at 4:00 PM EST)
 - **Holiday Awareness**: Skips weekends and US holidays (2025)
 - **Error Handling**: Comprehensive error handling and logging
 - **Rate Limiting**: Respects API rate limits (Finnhub: ~60 calls/min)
@@ -202,6 +202,8 @@ cat response.json
 | ticker    | String (SK) | Stock ticker symbol |
 | earningsDate | String | Date of the earnings announcement |
 | time      | String | "AMC" or "BMO" |
+
+**Note**: Tables are created dynamically and cleaned up at 4:00 PM EST (normal days) or 1:00 PM EST (early closure days). No TTL is used - tables are deleted entirely.
 
 ### EventBridge Schedule
 

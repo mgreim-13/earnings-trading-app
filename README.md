@@ -18,7 +18,7 @@ This system automates the entire earnings trading workflow from scanning potenti
 ### **AWS Services Used**
 - **AWS Lambda**: Serverless compute for all trading functions
 - **EventBridge**: Cron-based scheduling for automated execution
-- **DynamoDB**: Temporary data storage with TTL
+- **DynamoDB**: Temporary data storage (cleaned up at 4:00 PM EST)
 - **CloudWatch**: Logging and monitoring
 - **AWS Secrets Manager**: Secure API key storage
 - **SNS**: Alert notifications
@@ -210,8 +210,8 @@ Final Recommendation
 - **Rate Limiting**: Respects API limits with automatic retry mechanisms
 
 ### **DynamoDB Tables**
-- **dev-earnings-data**: Temporary storage for earnings calendar data (30min TTL)
-- **dev-filtered-stocks**: Temporary storage for filtered stock recommendations (30min TTL)
+- **dev-earnings-data**: Temporary storage for earnings calendar data (cleaned up at 4:00 PM EST)
+- **dev-filtered-stocks**: Temporary storage for filtered stock recommendations (cleaned up at 4:00 PM EST)
 
 ## 💰 Cost Analysis
 

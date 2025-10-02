@@ -68,9 +68,15 @@ aws secretsmanager create-secret \
     --secret-string '{"apiKey":"your-api-key","secretKey":"your-secret-key"}'
 ```
 
-### 4. Create DynamoDB Tables
+### 4. DynamoDB Tables
+
+**Note**: DynamoDB tables are created and managed automatically by MarketSchedulerLambda:
+- Tables created at 3:25 PM EST (normal days) / 12:25 PM EST (early closure days)
+- Tables cleaned up at 4:00 PM EST (normal days) / 1:00 PM EST (early closure days)
+- No manual table creation required
 
 ```bash
+# Tables are created automatically, but for reference:
 # Create FilteredTickersTable
 aws dynamodb create-table \
     --table-name FilteredTickersTable \

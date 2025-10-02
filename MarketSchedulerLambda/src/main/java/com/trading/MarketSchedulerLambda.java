@@ -397,8 +397,9 @@ public class MarketSchedulerLambda implements RequestHandler<Map<String, Object>
     }
     
     /**
-     * Create DynamoDB tables with 30-minute TTL
+     * Create DynamoDB tables for temporary data storage
      * Tables are created only on market-open days, 5 minutes before ScanEarningsLambda runs
+     * Tables are cleaned up at 4:00 PM EST
      */
     private void createDynamoDBTables(Context context) {
         try {
@@ -461,21 +462,11 @@ public class MarketSchedulerLambda implements RequestHandler<Map<String, Object>
                 )
                 .tags(
                     software.amazon.awssdk.services.dynamodb.model.Tag.builder().key("Environment").value(System.getenv().getOrDefault("ENVIRONMENT", "dev")).build(),
-                    software.amazon.awssdk.services.dynamodb.model.Tag.builder().key("Purpose").value("Trading data with 30-minute TTL").build()
+                    software.amazon.awssdk.services.dynamodb.model.Tag.builder().key("Purpose").value("Trading data - cleaned up at 4:00 PM").build()
                 )
                 .build();
             
             dynamoDbClient.createTable(createRequest);
-            
-            // Set TTL after table creation
-            UpdateTimeToLiveRequest ttlRequest = UpdateTimeToLiveRequest.builder()
-                .tableName(tableName)
-                .timeToLiveSpecification(TimeToLiveSpecification.builder()
-                    .attributeName("ttl")
-                    .enabled(true)
-                    .build())
-                .build();
-            dynamoDbClient.updateTimeToLive(ttlRequest);
             
             context.getLogger().log("Successfully created table: " + tableName);
             

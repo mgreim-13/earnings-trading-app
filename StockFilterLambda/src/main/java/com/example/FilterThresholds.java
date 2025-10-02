@@ -8,15 +8,15 @@ public class FilterThresholds {
     
     // ===== CORE THRESHOLDS =====
     public static final double VOLUME_THRESHOLD = 1500000.0;                    // Minimum average daily volume
-    public static final double IV_RATIO_THRESHOLD = 1.20;                       // Minimum IV ratio (short/long)
+    public static final double IV_RATIO_THRESHOLD = 1.15;                       // Minimum IV ratio (short/long) - lowered from 1.20
     public static final double ATM_THRESHOLD = 0.02;                            // ATM options within 2% of stock price
     
     // ===== LIQUIDITY FILTER THRESHOLDS =====
-    public static final double BID_ASK_THRESHOLD = 0.05;                        // Maximum bid-ask spread (5%)
-    public static final long QUOTE_DEPTH_THRESHOLD = 200L;                      // Minimum quote depth (bid+ask size)
-    public static final long MIN_DAILY_OPTION_TRADES = 300L;                    // Minimum daily option trades
-    public static final double MIN_STOCK_PRICE = 30.0;                          // Minimum stock price
-    public static final double MAX_STOCK_PRICE = 400.0;                         // Maximum stock price
+    public static final double BID_ASK_THRESHOLD = 0.08;                        // Maximum bid-ask spread (8% - more realistic for earnings week)
+    public static final long QUOTE_DEPTH_THRESHOLD = 100L;                      // Minimum quote depth (bid+ask size)
+    public static final long MIN_DAILY_OPTION_TRADES = 150L;                    // Minimum daily option trades
+    public static final double MIN_STOCK_PRICE = 25.0;                          // Minimum stock price (lowered from $30)
+    public static final double MAX_STOCK_PRICE = 500.0;                         // Maximum stock price (increased from $400)
     
     // ===== IV RATIO FILTER THRESHOLDS =====
     // Uses IV_RATIO_THRESHOLD from core thresholds
@@ -28,13 +28,13 @@ public class FilterThresholds {
     public static final double MAX_DEBIT_TO_PRICE_RATIO = 0.04;                 // Maximum debit/price ratio (4%)
     
     // ===== EARNINGS STABILITY FILTER THRESHOLDS =====
-    public static final double STABILITY_THRESHOLD = 0.70;                      // Minimum stability ratio (70%)
-    public static final double EARNINGS_STABILITY_THRESHOLD = 0.05;             // Maximum earnings move (5%)
+    public static final double STABILITY_THRESHOLD = 0.6;                      // Minimum stability ratio (75% - more restrictive)
+    public static final double EARNINGS_STABILITY_THRESHOLD = 0.07;             // Maximum earnings move (7% - loosened from 5%)
     public static final double STRADDLE_HISTORICAL_MULTIPLIER = 1.5;            // Straddle overpricing multiplier
     
     // ===== VOLATILITY CRUSH FILTER THRESHOLDS =====
-    public static final double VOLATILITY_CRUSH_THRESHOLD = 0.80;               // Maximum post/pre volatility ratio
-    public static final double CRUSH_PERCENTAGE = 0.70;                         // Minimum crush frequency (70%)
+    public static final double VOLATILITY_CRUSH_THRESHOLD = 0.92;               // Maximum post/pre volatility ratio (95% - more realistic)
+    public static final double CRUSH_PERCENTAGE = 0.45;                         // Minimum crush frequency (30% - more achievable)
     public static final int VOLATILITY_LOOKBACK_DAYS = 365;                     // Historical data lookback
     
     // ===== HARDCODED THRESHOLDS (Previously Not Configurable) =====
@@ -44,7 +44,7 @@ public class FilterThresholds {
     public static final double BASE_POSITION_SIZE = 0.05;                       // 5% base position size
     public static final double OPTIONAL_FILTER_BONUS = 0.01;                    // 1% bonus per optional filter
     public static final long MIN_OPTION_SIZE = 50L;                             // Minimum option size for liquidity
-    public static final double EARNINGS_MOVE_THRESHOLD = 0.05;                  // 5% earnings move threshold for stability
+    public static final double EARNINGS_MOVE_THRESHOLD = 0.07;                  // 7% earnings move threshold for stability (updated to match EARNINGS_STABILITY_THRESHOLD)
     
     // ===== POSITION SIZING =====
     public static final double MAX_POSITION_SIZE = BASE_POSITION_SIZE + (2 * OPTIONAL_FILTER_BONUS); // 7% maximum position size
