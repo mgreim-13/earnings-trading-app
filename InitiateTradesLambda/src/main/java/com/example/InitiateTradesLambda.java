@@ -12,9 +12,11 @@ import com.trading.common.JsonParsingUtils;
 import com.trading.common.OptionSymbolUtils;
 import com.trading.common.PortfolioEquityValidator;
 import com.trading.common.models.AlpacaCredentials;
+import com.trading.common.models.OptionSnapshot;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.*;
 
+import java.io.IOException;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.*;
@@ -25,7 +27,7 @@ import java.util.*;
  */
 public class InitiateTradesLambda implements RequestHandler<Map<String, Object>, String> {
 
-    private static final String FILTERED_TABLE = System.getenv().getOrDefault("FILTERED_TABLE", "dev-filtered-tickers-table");
+    private static final String FILTERED_TABLE = System.getenv().getOrDefault("FILTERED_TABLE", "filtered-tickers-table");
     private static final String ALPACA_SECRET_NAME = System.getenv().getOrDefault("ALPACA_SECRET_NAME", "trading/alpaca/credentials");
     // No default position size - only trade tickers with valid position size data
     private static final int CONTRACT_MULTIPLIER = 100;
@@ -99,10 +101,31 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
                     if (orderId != null && !orderId.isEmpty()) {
                         TradingCommonUtils.logTradeSuccess(ticker, orderId, context);
                         ordersSubmitted++;
+                        
+                        // Check buying power after successful order to prevent overextension
+                        try {
+                            String responseBody = AlpacaHttpClient.getAlpacaTrading("/account", credentials);
+                            JsonNode accountNode = JsonUtils.parseJson(responseBody);
+                            double currentBuyingPower = accountNode.get("buying_power").asDouble();
+                            
+                            if (currentBuyingPower <= 0) {
+                                context.getLogger().log("Buying power exhausted after " + ticker + " order - stopping processing");
+                                break; // Stop processing remaining tickers
+                            }
+                        } catch (Exception e) {
+                            context.getLogger().log("Warning: Could not check buying power after order: " + e.getMessage());
+                            // Continue processing but log the warning
+                        }
                     } else {
                         TradingCommonUtils.logTradeFailure(ticker, "order_submission_failed", context);
                     }
                 } catch (Exception e) {
+                    // Check if this is an insufficient funds error
+                    if (e.getMessage() != null && e.getMessage().contains("INSUFFICIENT_FUNDS")) {
+                        context.getLogger().log("Insufficient funds detected - stopping order processing");
+                        TradingCommonUtils.logTradeFailure(ticker, "insufficient_funds", context);
+                        break; // Stop processing remaining tickers
+                    }
                     TradingCommonUtils.logTradeFailure(ticker, "processing_error: " + e.getMessage(), context);
                 }
             }
@@ -143,14 +166,14 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
             
             for (Map<String, AttributeValue> item : response.items()) {
                 String ticker = item.get("ticker").s();
-                String status = item.get("status").s();
                 
-                if ("Recommended".equals(status) || "Consider".equals(status)) {
-                    totalTickers++;
-                    // Only include tickers with valid position size data
-                    if (item.containsKey("positionSizePercentage") && item.get("positionSizePercentage").n() != null) {
-                        try {
-                            double positionSize = Double.parseDouble(item.get("positionSizePercentage").n());
+                // Only include tickers with valid position size data (non-zero indicates it should be traded)
+                if (item.containsKey("positionSizePercentage") && item.get("positionSizePercentage").n() != null) {
+                    try {
+                        double positionSize = Double.parseDouble(item.get("positionSizePercentage").n());
+                        // Any non-zero position size indicates this ticker should be traded
+                        if (positionSize > 0) {
+                            totalTickers++;
                             // Validate position size is reasonable (between 0.01 and 0.20 = 1% to 20%)
                             if (positionSize >= 0.01 && positionSize <= 0.20) {
                                 tickerPositionSizes.put(ticker, positionSize);
@@ -158,14 +181,14 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
                                 System.out.println("Skipping " + ticker + " - invalid position size: " + positionSize);
                                 skippedTickers++;
                             }
-                        } catch (NumberFormatException e) {
-                            System.out.println("Skipping " + ticker + " - corrupted position size data: " + e.getMessage());
-                            skippedTickers++;
                         }
-                    } else {
-                        System.out.println("Skipping " + ticker + " - missing position size data");
+                    } catch (NumberFormatException e) {
+                        System.out.println("Skipping " + ticker + " - corrupted position size data: " + e.getMessage());
                         skippedTickers++;
                     }
+                } else {
+                    System.out.println("Skipping " + ticker + " - missing position size data");
+                    skippedTickers++;
                 }
             }
 
@@ -218,45 +241,43 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
     }
 
     /**
-     * Fetches and parses option snapshots from Alpaca API
+     * Fetches and parses option snapshots from Alpaca API using existing AlpacaHttpClient method
      */
     private Map<String, List<Map<String, Object>>> fetchAndParseOptionSnapshots(String ticker, AlpacaCredentials credentials) {
         LocalDate today = LocalDate.now(ZoneId.of("America/New_York"));
-        String expirationGte = today.plusDays(1).toString();
-        String expirationLte = today.plusDays(60).toString();
+        LocalDate expirationGte = today.plusDays(1);
+        LocalDate expirationLte = today.plusDays(60);
 
-        String endpoint = "/options/snapshots/" + ticker + 
-                    "?type=call&expiration_date_gte=" + expirationGte + "&expiration_date_lte=" + expirationLte + 
-                    "&feed=opra&limit=1000";
-
-        String responseBody = AlpacaHttpClient.getAlpacaOptions(endpoint, credentials);
-        JsonNode snapshots = JsonUtils.parseJson(responseBody).get("snapshots");
-        if (snapshots == null || !snapshots.isObject() || snapshots.size() == 0) {
-            throw new RuntimeException("No option snapshots found for " + ticker);
-        }
-
-        Map<String, List<Map<String, Object>>> contractsByExpiration = new HashMap<>();
-        snapshots.fields().forEachRemaining(entry -> {
-            String symbol = entry.getKey();
-            JsonNode snapshot = entry.getValue();
-            try {
-                Map<String, Object> parsed = OptionSymbolUtils.parseOptionSymbol(symbol);
-                String expiration = (String) parsed.get("expiration");
-                double strike = (Double) parsed.get("strike");
-                
-                Map<String, Object> contractInfo = new HashMap<>();
-                contractInfo.put("symbol", symbol);
-                contractInfo.put("strike", strike);
-                contractInfo.put("snapshot", snapshot);
-                
-                contractsByExpiration.computeIfAbsent(expiration, k -> new ArrayList<>()).add(contractInfo);
-            } catch (RuntimeException e) {
-                // Skip invalid symbols and continue processing
-                System.out.println("Skipping invalid option symbol: " + symbol + " - " + e.getMessage());
+        try {
+            Map<String, OptionSnapshot> optionSnapshots = AlpacaHttpClient.getOptionChain(ticker, expirationGte, expirationLte, "call", credentials);
+            
+            if (optionSnapshots == null || optionSnapshots.isEmpty()) {
+                throw new RuntimeException("No option snapshots found for " + ticker);
             }
-        });
-        
-        return contractsByExpiration;
+
+            Map<String, List<Map<String, Object>>> contractsByExpiration = new HashMap<>();
+            optionSnapshots.forEach((symbol, snapshot) -> {
+                try {
+                    Map<String, Object> parsed = OptionSymbolUtils.parseOptionSymbol(symbol);
+                    String expiration = (String) parsed.get("expiration");
+                    double strike = (Double) parsed.get("strike");
+                    
+                    Map<String, Object> contractInfo = new HashMap<>();
+                    contractInfo.put("symbol", symbol);
+                    contractInfo.put("strike", strike);
+                    contractInfo.put("snapshot", snapshot);
+                    
+                    contractsByExpiration.computeIfAbsent(expiration, k -> new ArrayList<>()).add(contractInfo);
+                } catch (RuntimeException e) {
+                    // Skip invalid symbols and continue processing
+                    System.out.println("Skipping invalid option symbol: " + symbol + " - " + e.getMessage());
+                }
+            });
+            
+            return contractsByExpiration;
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to fetch option chain for " + ticker, e);
+        }
     }
 
     /**
@@ -359,7 +380,7 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
 
 
     private double getCurrentStockPrice(String ticker, AlpacaCredentials credentials) {
-        String endpoint = "/stocks/" + ticker + "/quotes/latest?feed=opra";
+        String endpoint = "/stocks/" + ticker + "/quotes/latest?feed=sip";
         String responseBody = AlpacaHttpClient.getAlpacaData(endpoint, credentials);
         JsonNode quote = JsonUtils.parseJson(responseBody).get("quote");
         return quote != null ? JsonParsingUtils.getMidPrice(quote) : 0.0;

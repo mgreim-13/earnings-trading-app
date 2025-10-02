@@ -110,9 +110,17 @@ public class LiquidityFilter {
                 return new OptionsLiquidityData(false, false, false);
             }
             
-            // Filter to short leg options only
+            // Filter to short leg options only - filter by expiration date from option symbols
             Map<String, OptionSnapshot> shortChain = allOptions.entrySet().stream()
-                .filter(entry -> entry.getKey().equals(shortExpiration.toString()))
+                .filter(entry -> {
+                    try {
+                        Map<String, Object> parsed = com.trading.common.OptionSymbolUtils.parseOptionSymbol(entry.getKey());
+                        String expiration = (String) parsed.get("expiration");
+                        return shortExpiration.toString().equals(expiration);
+                    } catch (RuntimeException e) {
+                        return false;
+                    }
+                })
                 .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
             
             // Find long leg using reusable logic - closest to 30 days from scan date
@@ -122,9 +130,17 @@ public class LiquidityFilter {
                 return new OptionsLiquidityData(false, false, false);
             }
             
-            // Filter to long leg options only
+            // Filter to long leg options only - filter by expiration date from option symbols
             Map<String, OptionSnapshot> longChain = allOptions.entrySet().stream()
-                .filter(entry -> entry.getKey().equals(longExpiration.toString()))
+                .filter(entry -> {
+                    try {
+                        Map<String, Object> parsed = com.trading.common.OptionSymbolUtils.parseOptionSymbol(entry.getKey());
+                        String expiration = (String) parsed.get("expiration");
+                        return longExpiration.toString().equals(expiration);
+                    } catch (RuntimeException e) {
+                        return false;
+                    }
+                })
                 .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
             
             // Check if we have at least one leg

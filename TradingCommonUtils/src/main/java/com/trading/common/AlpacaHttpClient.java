@@ -79,7 +79,11 @@ public class AlpacaHttpClient {
                         Thread.sleep(1000 * (attempt + 1)); // Exponential backoff
                         continue;
                     } else {
-                        throw new RuntimeException("HTTP " + response.code() + ": " + response.body().string());
+                        String errorBody = response.body().string();
+                        if (isInsufficientFundsError(response.code(), errorBody)) {
+                            throw new RuntimeException("INSUFFICIENT_FUNDS: " + errorBody);
+                        }
+                        throw new RuntimeException("HTTP " + response.code() + ": " + errorBody);
                     }
                 }
             } catch (InterruptedException e) {
@@ -182,6 +186,20 @@ public class AlpacaHttpClient {
         } catch (Exception e) {
             return false; // Conservative approach
         }
+    }
+    
+    /**
+     * Check if error response indicates insufficient funds
+     */
+    private static boolean isInsufficientFundsError(int statusCode, String errorBody) {
+        if (statusCode == 422 || statusCode == 403) {
+            String lowerErrorBody = errorBody.toLowerCase();
+            return lowerErrorBody.contains("insufficient") && 
+                   (lowerErrorBody.contains("buying power") || 
+                    lowerErrorBody.contains("balance") || 
+                    lowerErrorBody.contains("funds"));
+        }
+        return false;
     }
     
     // ===== HELPER METHODS FOR CODE REUSE =====
@@ -305,7 +323,7 @@ public class AlpacaHttpClient {
      */
     public static StockQuote getLatestQuote(String symbol, AlpacaCredentials credentials) throws IOException {
         try {
-            String responseBody = getAlpacaData("/stocks/" + symbol + "/quotes/latest", credentials);
+            String responseBody = getAlpacaData("/stocks/" + symbol + "/quotes/latest?feed=sip", credentials);
             JsonNode jsonNode = parseJson(responseBody);
             
             if (jsonNode.has("quote")) {
@@ -331,7 +349,7 @@ public class AlpacaHttpClient {
                 "symbols=" + symbol +
                 "&start=" + formatDate(startDate) +
                 "&end=" + formatDate(endDate) +
-                "&timeframe=1Day&limit=1000&feed=opra&adjustment=all";
+                "&timeframe=1Day&limit=1000&feed=sip&adjustment=all";
             
             String responseBody = getAlpacaData(endpoint, credentials);
             JsonNode jsonNode = parseJson(responseBody);
@@ -356,7 +374,7 @@ public class AlpacaHttpClient {
      */
     public static LatestTrade getLatestTrade(String symbol, AlpacaCredentials credentials) throws IOException {
         try {
-            String responseBody = getAlpacaData("/stocks/" + symbol + "/trades/latest", credentials);
+            String responseBody = getAlpacaData("/stocks/" + symbol + "/trades/latest?feed=sip", credentials);
             JsonNode jsonNode = parseJson(responseBody);
             
             if (jsonNode.has("trade")) {
@@ -486,7 +504,13 @@ public class AlpacaHttpClient {
                                                      AlpacaCredentials credentials) throws IOException {
         return processSymbolsInBatchesAsMap(symbols, (batch, creds) -> {
             String symbolsParam = createSymbolsParam(batch);
-            String fullEndpoint = endpoint + "?symbols=" + symbolsParam + "&feed=opra&limit=1000";
+            // Check if this is a latest endpoint (no limit) or snapshots endpoint (has limit)
+            String fullEndpoint;
+            if (endpoint.contains("/latest")) {
+                fullEndpoint = endpoint + "?symbols=" + symbolsParam + "&feed=opra";
+            } else {
+                fullEndpoint = endpoint + "?symbols=" + symbolsParam + "&feed=opra&limit=1000";
+            } 
             
             String responseBody = getAlpacaOptions(fullEndpoint, creds);
             JsonNode jsonNode = parseJson(responseBody);
@@ -504,7 +528,7 @@ public class AlpacaHttpClient {
                                                         AlpacaCredentials credentials) throws IOException {
         return processSymbolsInBatches(symbols, (batch, creds) -> {
             String symbolsParam = createSymbolsParam(batch);
-            String fullEndpoint = endpoint + "?symbols=" + symbolsParam + "&feed=opra&limit=10000&sort=asc";
+            String fullEndpoint = endpoint + "&symbols=" + symbolsParam + "&limit=10000&sort=asc";
             
             String responseBody = getAlpacaOptions(fullEndpoint, creds);
             JsonNode jsonNode = parseJson(responseBody);

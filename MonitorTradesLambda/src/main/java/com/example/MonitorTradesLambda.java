@@ -10,6 +10,7 @@ import com.trading.common.AlpacaHttpClient;
 import com.trading.common.JsonParsingUtils;
 import com.trading.common.PortfolioEquityValidator;
 import com.trading.common.OptionSymbolUtils;
+import com.trading.common.ExitOrderUtils;
 import com.trading.common.models.AlpacaCredentials;
 
 import java.time.LocalDate;
@@ -400,7 +401,7 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
      */
     private String resubmitOrderWithNewLimit(Map<String, Object> originalOrder, double newLimitPrice, AlpacaCredentials credentials) {
         try {
-            // Calculate trade value for equity check
+            // Calculate trade value for equity check using existing pattern
             int qty = Integer.parseInt(originalOrder.get("qty").toString());
             double tradeValue = Math.abs(newLimitPrice * qty * 100); // 100 is contract multiplier
             
@@ -409,21 +410,16 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
                 throw new RuntimeException("Insufficient equity for order resubmission: $" + String.format("%.2f", tradeValue));
             }
             
-            // Build the new order JSON with updated limit price
-            Map<String, Object> newOrder = new HashMap<>();
-            newOrder.put("symbol", originalOrder.get("symbol"));
-            newOrder.put("qty", originalOrder.get("qty"));
-            newOrder.put("type", "limit");
-            newOrder.put("limit_price", newLimitPrice);
-            newOrder.put("time_in_force", originalOrder.get("time_in_force"));
-            newOrder.put("order_class", "mleg");
-            newOrder.put("legs", originalOrder.get("legs"));
+            // Convert order to position format for reusable utility
+            List<Map<String, Object>> positions = convertOrderLegsToPositions(originalOrder);
             
-            String jsonBody = JsonUtils.toJson(newOrder);
-            String responseBody = AlpacaHttpClient.postAlpacaTrading("/orders", jsonBody, credentials);
+            // Use reusable utility to create limit order
+            String exitOrderJson = ExitOrderUtils.createCalendarSpreadExitOrderWithLimit(positions, newLimitPrice);
             
-            JsonNode response = JsonUtils.parseJson(responseBody);
-            return response.get("id").asText();
+            // Use existing submitOrder pattern
+            Map<String, Object> orderResult = ExitOrderUtils.submitExitOrder(exitOrderJson, credentials);
+            return (String) orderResult.get("orderId");
+            
         } catch (Exception e) {
             throw new RuntimeException("Error resubmitting order with new limit price", e);
         }
@@ -447,31 +443,51 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
                 }
             }
             
-            // Build market order JSON (no limit_price for market orders)
-            Map<String, Object> marketOrder = new HashMap<>();
-            marketOrder.put("symbol", originalOrder.get("symbol"));
-            marketOrder.put("qty", originalOrder.get("qty"));
-            marketOrder.put("type", "market");
-            marketOrder.put("order_class", "mleg");
-            marketOrder.put("legs", originalOrder.get("legs"));
-            // Note: market orders do NOT have a limit_price
+            // Convert order to position format for reusable utility
+            List<Map<String, Object>> positions = convertOrderLegsToPositions(originalOrder);
             
-            String jsonBody = JsonUtils.toJson(marketOrder);
-            String responseBody = AlpacaHttpClient.postAlpacaTrading("/orders", jsonBody, credentials);
+            // Use reusable utility to create market order
+            String exitOrderJson = ExitOrderUtils.createCalendarSpreadExitOrder(positions, "market");
             
-            JsonNode jsonNode = JsonUtils.parseJson(responseBody);
-            return jsonNode.get("id").asText();
+            // Use existing submitOrder pattern
+            Map<String, Object> orderResult = ExitOrderUtils.submitExitOrder(exitOrderJson, credentials);
+            return (String) orderResult.get("orderId");
             
         } catch (Exception e) {
             throw new RuntimeException("Error submitting market order", e);
         }
     }
     
+    /**
+     * Helper method to convert order legs to position format for reusable utilities
+     * Reuses existing conversion logic
+     */
+    private List<Map<String, Object>> convertOrderLegsToPositions(Map<String, Object> originalOrder) {
+        List<Map<String, Object>> positions = new ArrayList<>();
+        List<Map<String, Object>> legs = (List<Map<String, Object>>) originalOrder.get("legs");
+        
+        for (Map<String, Object> leg : legs) {
+            Map<String, Object> position = new HashMap<>();
+            position.put("symbol", leg.get("symbol"));
+            position.put("qty", leg.get("qty"));
+            // Determine side based on position_intent
+            String positionIntent = (String) leg.get("position_intent");
+            if ("buy_to_open".equals(positionIntent) || "buy_to_close".equals(positionIntent)) {
+                position.put("side", "long");
+            } else {
+                position.put("side", "short");
+            }
+            positions.add(position);
+        }
+        
+        return positions;
+    }
+    
     
     /**
      * Checks if we're in a valid monitoring window
-     * Normal days: 9:45:30 AM - 10:00 AM EST and 3:45:30 PM - 4:00 PM EST
-     * Early closure days: 9:45:30 AM - 10:00 AM EST and 12:45:30 PM - 1:00 PM EST
+     * Normal days: 9:46 AM - 10:00 AM EST and 3:46 PM - 4:00 PM EST
+     * Early closure days: 9:46 AM - 10:00 AM EST and 12:46 PM - 1:00 PM EST
      */
     public boolean isInMonitoringWindow(String dayType) {
         try {
@@ -479,19 +495,19 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
             int hour = now.getHour();
             int minute = now.getMinute();
             
-            // Morning window: 9:45:30 AM - 10:00 AM EST (same for both day types)
-            boolean inMorningWindow = (hour == 9 && minute >= 45 && minute <= 59) || 
+            // Morning window: 9:46 AM - 10:00 AM EST (same for both day types)
+            boolean inMorningWindow = (hour == 9 && minute >= 46 && minute <= 59) || 
                                     (hour == 10 && minute == 0);
             
             // Afternoon window depends on day type
             boolean inAfternoonWindow;
             if ("early".equals(dayType)) {
-                // Early closure: 12:45:30 PM - 1:00 PM EST
-                inAfternoonWindow = (hour == 12 && minute >= 45 && minute <= 59) || 
+                // Early closure: 12:46 PM - 1:00 PM EST
+                inAfternoonWindow = (hour == 12 && minute >= 46 && minute <= 59) || 
                                   (hour == 13 && minute == 0);
             } else {
-                // Normal day: 3:45:30 PM - 4:00 PM EST
-                inAfternoonWindow = (hour == 15 && minute >= 45 && minute <= 59) || 
+                // Normal day: 3:46 PM - 4:00 PM EST
+                inAfternoonWindow = (hour == 15 && minute >= 46 && minute <= 59) || 
                                   (hour == 16 && minute == 0);
             }
             

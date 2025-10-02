@@ -11,7 +11,7 @@ REGION="us-east-1"
 # Create earnings table
 echo "Creating earnings table..."
 aws dynamodb create-table \
-    --table-name dev-EarningsTable \
+    --table-name earnings-table \
     --attribute-definitions \
         AttributeName=scanDate,AttributeType=S \
         AttributeName=ticker,AttributeType=S \
@@ -24,13 +24,13 @@ aws dynamodb create-table \
 # Wait for table to be created
 echo "Waiting for earnings table to be created..."
 aws dynamodb wait table-exists \
-    --table-name dev-EarningsTable \
+    --table-name earnings-table \
     --region $REGION
 
 # Create filtered tickers table
 echo "Creating filtered tickers table..."
 aws dynamodb create-table \
-    --table-name dev-filtered-tickers-table \
+    --table-name filtered-tickers-table \
     --attribute-definitions \
         AttributeName=scanDate,AttributeType=S \
         AttributeName=ticker,AttributeType=S \
@@ -43,12 +43,12 @@ aws dynamodb create-table \
 # Wait for table to be created
 echo "Waiting for filtered tickers table to be created..."
 aws dynamodb wait table-exists \
-    --table-name dev-filtered-tickers-table \
+    --table-name filtered-tickers-table \
     --region $REGION
 
 echo "DynamoDB tables created successfully!"
-echo "Earnings table: dev-EarningsTable"
-echo "Filtered tickers table: dev-filtered-tickers-table"
+echo "Earnings table: earnings-table"
+echo "Filtered tickers table: filtered-tickers-table"
 
 # Add some test data
 echo "Adding test data to earnings table..."
@@ -59,7 +59,7 @@ TICKERS=("AAPL" "MSFT" "GOOGL" "AMZN" "TSLA" "META" "NVDA" "NFLX" "AMD" "INTC")
 
 for ticker in "${TICKERS[@]}"; do
     aws dynamodb put-item \
-        --table-name dev-EarningsTable \
+        --table-name earnings-table \
         --item "{\"scanDate\": {\"S\": \"$TODAY\"}, \"ticker\": {\"S\": \"$ticker\"}}" \
         --region $REGION
     echo "Added $ticker to earnings table"

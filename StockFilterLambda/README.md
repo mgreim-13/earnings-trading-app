@@ -93,7 +93,7 @@ aws dynamodb create-table \
 
 # Create filtered tickers table
 aws dynamodb create-table \
-    --table-name dev-filtered-tickers-table \
+    --table-name filtered-tickers-table \
     --attribute-definitions \
         AttributeName=scanDate,AttributeType=S \
         AttributeName=ticker,AttributeType=S \

@@ -3,6 +3,8 @@ package com.trading.common;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 
+import java.util.Map;
+
 /**
  * Utility class for JSON operations with centralized error handling
  * Consolidates JSON parsing and serialization logic
@@ -63,6 +65,21 @@ public class JsonUtils {
             return CommonConstants.OBJECT_MAPPER.writeValueAsString(object);
         } catch (JsonProcessingException e) {
             return fallback;
+        }
+    }
+    
+    /**
+     * Parse JSON string to Map with error handling
+     * 
+     * @param json JSON string to parse
+     * @return Map<String, Object> or null if parsing fails
+     */
+    @SuppressWarnings("unchecked")
+    public static Map<String, Object> parseJsonToMap(String json) {
+        try {
+            return CommonConstants.OBJECT_MAPPER.readValue(json, Map.class);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("JSON parsing to Map failed: " + e.getMessage(), e);
         }
     }
     

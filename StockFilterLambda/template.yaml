@@ -9,8 +9,8 @@ Globals:
     Runtime: java21
     Environment:
       Variables:
-        EARNINGS_TABLE: !Ref EarningsTable
-        FILTERED_TABLE: !Ref FilteredTickersTable
+        EARNINGS_TABLE: 'earnings-table'
+        FILTERED_TABLE: 'filtered-tickers-table'
         VOLUME_THRESHOLD: '2000000'
         IV_RATIO_THRESHOLD: '1.25'
         ATM_THRESHOLD: '0.05'
@@ -50,8 +50,8 @@ Resources:
       Runtime: java21
       Environment:
         Variables:
-          EARNINGS_TABLE: !Ref EarningsTable
-          FILTERED_TABLE: !Ref FilteredTickersTable
+          EARNINGS_TABLE: 'earnings-table'
+          FILTERED_TABLE: 'filtered-tickers-table'
           VOLUME_THRESHOLD: '2000000'
           IV_RATIO_THRESHOLD: '1.25'
           ATM_THRESHOLD: '0.05'
@@ -71,9 +71,9 @@ Resources:
           MIN_SCORE_THRESHOLD: '7'
       Policies:
         - DynamoDBReadPolicy:
-            TableName: !Ref EarningsTable
+            TableName: 'earnings-table'
         - DynamoDBWritePolicy:
-            TableName: !Ref FilteredTickersTable
+            TableName: 'filtered-tickers-table'
         - Version: '2012-10-17'
           Statement:
             - Effect: Allow
@@ -86,53 +86,7 @@ Resources:
         Environment: !Ref Environment
         Service: StockFilter
 
-  # DynamoDB Table for Earnings Data
-  EarningsTable:
-    Type: AWS::DynamoDB::Table
-    Properties:
-      TableName: !Sub '${Environment}-earnings-data'
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: scanDate
-          AttributeType: S
-        - AttributeName: ticker
-          AttributeType: S
-      KeySchema:
-        - AttributeName: scanDate
-          KeyType: HASH
-        - AttributeName: ticker
-          KeyType: RANGE
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: true
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Service
-          Value: EarningsData
-
-  # DynamoDB Table for Filtered Tickers
-  FilteredTickersTable:
-    Type: AWS::DynamoDB::Table
-    Properties:
-      TableName: !Sub '${Environment}-filtered-stocks'
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: scanDate
-          AttributeType: S
-        - AttributeName: ticker
-          AttributeType: S
-      KeySchema:
-        - AttributeName: scanDate
-          KeyType: HASH
-        - AttributeName: ticker
-          KeyType: RANGE
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: true
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Service
-          Value: FilteredTickers
+  # Tables are created dynamically by MarketSchedulerLambda in main CloudFormation template
 
   # CloudWatch Log Group
   StockFilterLogGroup:
@@ -180,13 +134,13 @@ Outputs:
 
   EarningsTableName:
     Description: 'Earnings Table Name'
-    Value: !Ref EarningsTable
+    Value: 'earnings-table'
     Export:
       Name: !Sub '${Environment}-EarningsTableName'
 
   FilteredTickersTableName:
     Description: 'Filtered Tickers Table Name'
-    Value: !Ref FilteredTickersTable
+    Value: 'filtered-tickers-table'
     Export:
       Name: !Sub '${Environment}-FilteredTickersTableName'
 

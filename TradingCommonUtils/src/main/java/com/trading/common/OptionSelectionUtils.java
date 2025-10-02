@@ -59,7 +59,26 @@ public class OptionSelectionUtils {
         }
         
         // Extract expiration dates from map keys
-        List<String> expirations = new ArrayList<>(optionChain.keySet());
+        // Handle both data structures: expiration dates as keys OR option symbols as keys
+        List<String> expirations = new ArrayList<>();
+        for (String key : optionChain.keySet()) {
+            // Check if key is already an expiration date (YYYY-MM-DD format)
+            if (key.matches("\\d{4}-\\d{2}-\\d{2}")) {
+                expirations.add(key);
+            } else {
+                // Key is an option symbol, extract expiration date
+                try {
+                    Map<String, Object> parsed = com.trading.common.OptionSymbolUtils.parseOptionSymbol(key);
+                    String expiration = (String) parsed.get("expiration");
+                    if (expiration != null) {
+                        expirations.add(expiration);
+                    }
+                } catch (RuntimeException e) {
+                    // Skip invalid symbols and continue processing
+                }
+            }
+        }
+        
         return findShortLegExpiration(expirations, today);
     }
     
@@ -121,7 +140,27 @@ public class OptionSelectionUtils {
         }
         
         // Extract expiration dates from map keys
-        List<String> expirations = new ArrayList<>(optionChain.keySet());
+        // Handle both data structures: expiration dates as keys OR option symbols as keys
+        List<String> expirations = new ArrayList<>();
+        for (String key : optionChain.keySet()) {
+            // Check if key is already an expiration date (YYYY-MM-DD format)
+            if (key.matches("\\d{4}-\\d{2}-\\d{2}")) {
+                expirations.add(key);
+            } else {
+                // Key is an option symbol, extract expiration date
+                try {
+                    Map<String, Object> parsed = com.trading.common.OptionSymbolUtils.parseOptionSymbol(key);
+                    String expiration = (String) parsed.get("expiration");
+                    if (expiration != null) {
+                        expirations.add(expiration);
+                    }
+                } catch (RuntimeException e) {
+                    // Skip invalid symbols and continue processing
+                    System.out.println("Skipping invalid option symbol: " + key + " - " + e.getMessage());
+                }
+            }
+        }
+        
         return findFarLegExpiration(expirations, today, nearExpiration, targetDays);
     }
     

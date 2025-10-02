@@ -2,6 +2,7 @@ package com.trading.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.trading.common.models.*;
+import java.util.Map;
 
 /**
  * Shared utilities for parsing JSON data from Alpaca API responses
@@ -45,7 +46,7 @@ public class JsonParsingUtils {
             symbol,
             tradeNode.get("p").asDouble(), // price
             tradeNode.get("s").asLong(),   // size
-            tradeNode.get("t").asLong()    // timestamp
+            parseTimestamp(tradeNode.get("t"))    // timestamp
         );
     }
     
@@ -53,11 +54,20 @@ public class JsonParsingUtils {
      * Parse option snapshot from JSON node
      */
     public static OptionSnapshot parseOptionSnapshot(JsonNode node, String symbol) {
-        // Note: Strike, expiration, and type are not in the snapshot response
-        // They need to be extracted from the symbol key or passed separately
-        double strike = 0.0; // Not available in snapshot response
-        String expiration = ""; // Not available in snapshot response  
-        String type = ""; // Not available in snapshot response
+        // Extract strike, expiration, and type from the option symbol
+        double strike = 0.0;
+        String expiration = "";
+        String type = "";
+        
+        try {
+            Map<String, Object> parsed = OptionSymbolUtils.parseOptionSymbol(symbol);
+            strike = (Double) parsed.get("strike");
+            expiration = (String) parsed.get("expiration");
+            type = (String) parsed.get("type");
+        } catch (Exception e) {
+            // If parsing fails, use defaults
+            System.out.println("Warning: Failed to parse option symbol " + symbol + ": " + e.getMessage());
+        }
         
         double impliedVol = 0.0;
         double delta = 0.0;
@@ -99,7 +109,7 @@ public class JsonParsingUtils {
     public static OptionTrade parseOptionTrade(JsonNode node, String symbol) {
         double price = node.has("p") ? node.get("p").asDouble() : 0.0; // price
         long size = node.has("s") ? node.get("s").asLong() : 0; // size
-        long timestamp = node.has("t") ? node.get("t").asLong() : 0; // timestamp
+        long timestamp = parseTimestamp(node.get("t")); // timestamp
         
         return new OptionTrade(symbol, price, size, timestamp);
     }
@@ -126,7 +136,7 @@ public class JsonParsingUtils {
         double ask = node.has("ap") ? node.get("ap").asDouble() : 0.0; // ask price
         long bidSize = node.has("bs") ? node.get("bs").asLong() : 0; // bid size
         long askSize = node.has("as") ? node.get("as").asLong() : 0; // ask size
-        long timestamp = node.has("t") ? node.get("t").asLong() : 0; // timestamp
+        long timestamp = parseTimestamp(node.get("t")); // timestamp
         
         return new OptionQuote(symbol, bid, ask, bidSize, askSize, timestamp);
     }
@@ -181,5 +191,34 @@ public class JsonParsingUtils {
         double bid = getBidPrice(quote);
         double ask = getAskPrice(quote);
         return OptionSelectionUtils.validateBidAsk(bid, ask) > 0;
+    }
+    
+    /**
+     * Parse timestamp from JSON node, handling both string and numeric formats
+     */
+    private static long parseTimestamp(JsonNode timestampNode) {
+        if (timestampNode == null || timestampNode.isNull()) {
+            return 0L;
+        }
+        
+        if (timestampNode.isTextual()) {
+            // Handle ISO 8601 string format like "2024-04-22T19:59:59.992734208Z"
+            try {
+                String timestampStr = timestampNode.asText();
+                if (timestampStr.isEmpty()) {
+                    return 0L;
+                }
+                // Convert ISO 8601 to Unix timestamp (seconds since epoch)
+                return java.time.Instant.parse(timestampStr).getEpochSecond();
+            } catch (Exception e) {
+                System.out.println("Warning: Failed to parse timestamp: " + timestampNode.asText());
+                return 0L;
+            }
+        } else if (timestampNode.isNumber()) {
+            // Handle numeric timestamp (already in Unix format)
+            return timestampNode.asLong();
+        }
+        
+        return 0L;
     }
 }

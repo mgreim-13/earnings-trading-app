@@ -449,7 +449,11 @@ public class StockFilterCommonUtils {
         try {
             LocalDate startDate = baseDate.plusDays(minDays);
             LocalDate endDate = baseDate.plusDays(maxDays);
-            return com.trading.common.AlpacaHttpClient.getOptionChain(ticker, startDate, endDate, optionType, credentials);
+            context.getLogger().log("DEBUG: Fetching options for " + ticker + " from " + startDate + " to " + endDate + " (" + optionType + ")");
+            Map<String, com.trading.common.models.OptionSnapshot> result = com.trading.common.AlpacaHttpClient.getOptionChain(ticker, startDate, endDate, optionType, credentials);
+            context.getLogger().log("DEBUG: Options API returned " + (result != null ? result.size() : "null") + " options for " + ticker);
+            // Ensure we never return null - return empty map if no data
+            return result != null ? result : new java.util.HashMap<>();
         } catch (Exception e) {
             context.getLogger().log("Error getting option chain for " + ticker + " (" + minDays + "-" + maxDays + " days): " + e.getMessage());
             return new java.util.HashMap<>();

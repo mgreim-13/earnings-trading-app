@@ -81,7 +81,7 @@ sleep 5
 # Create the table
 print_status "Creating DynamoDB table..."
 aws dynamodb create-table \
-    --table-name EarningsTable \
+    --table-name earnings-table \
     --attribute-definitions \
         AttributeName=scanDate,AttributeType=S \
         AttributeName=ticker,AttributeType=S \
@@ -115,7 +115,7 @@ print_status "Lambda function test completed successfully!"
 # Check DynamoDB table contents
 print_status "Checking DynamoDB table contents..."
 aws dynamodb scan \
-    --table-name EarningsTable \
+    --table-name earnings-table \
     --endpoint-url http://localhost:8000 \
     --query 'Items[0:5]' \
     --output table

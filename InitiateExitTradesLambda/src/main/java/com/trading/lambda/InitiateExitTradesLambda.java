@@ -10,6 +10,8 @@ import com.trading.common.JsonUtils;
 import com.trading.common.TradingErrorHandler;
 import com.trading.common.AlpacaHttpClient;
 import com.trading.common.JsonParsingUtils;
+import com.trading.common.OptionSymbolUtils;
+import com.trading.common.ExitOrderUtils;
 import com.trading.common.models.AlpacaCredentials;
 
 import java.math.BigDecimal;
@@ -74,11 +76,11 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
                 return createSuccessResponse("Not yet time to exit positions.");
             }
             
-            // Fetch all held positions
+            // Use existing position fetching logic
             List<Position> allPositions = fetchHeldPositions();
             log.info("Fetched {} total positions from Alpaca", allPositions.size());
             
-            // Filter for option positions
+            // Filter for option positions using existing logic
             List<Position> optionPositions = allPositions.stream()
                     .filter(pos -> "option".equalsIgnoreCase(pos.getAssetClass()) || 
                                  "us_option".equalsIgnoreCase(pos.getAssetClass()))
@@ -90,7 +92,7 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
                 return createSuccessResponse("No option positions found.");
             }
             
-            // Group positions into calendar spreads only
+            // Group positions into calendar spreads using existing logic
             Map<String, List<Position>> calendarSpreadGroups = groupPositionsIntoMleg(optionPositions);
             log.info("Grouped positions into {} calendar spread groups", calendarSpreadGroups.size());
             
@@ -238,24 +240,29 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
     }
     
     /**
-     * Extract underlying symbol from option symbol (e.g., "AAPL240315C00150000" -> "AAPL")
+     * Extract underlying symbol from option symbol using OptionSymbolUtils
      */
     String extractUnderlyingSymbol(String optionSymbol) {
-        // Simple extraction - assumes standard option symbol format
-        int i = 0;
-        while (i < optionSymbol.length() && Character.isLetter(optionSymbol.charAt(i))) {
-            i++;
+        try {
+            Map<String, Object> parsed = OptionSymbolUtils.parseOptionSymbol(optionSymbol);
+            return (String) parsed.get("underlying");
+        } catch (Exception e) {
+            log.warn("Failed to parse option symbol: " + optionSymbol + " - " + e.getMessage());
+            return null;
         }
-        return optionSymbol.substring(0, i);
     }
     
     /**
-     * Extract expiration date from option symbol
+     * Extract expiration date from option symbol using OptionSymbolUtils
      */
     String extractExpirationDate(String optionSymbol) {
-        // This is a simplified extraction - in production, use a proper option symbol parser
-        String underlying = extractUnderlyingSymbol(optionSymbol);
-        return optionSymbol.substring(underlying.length(), underlying.length() + 6); // YYMMDD
+        try {
+            Map<String, Object> parsed = OptionSymbolUtils.parseOptionSymbol(optionSymbol);
+            return (String) parsed.get("expiration"); // Returns YYYY-MM-DD format
+        } catch (Exception e) {
+            log.warn("Failed to parse option symbol: " + optionSymbol + " - " + e.getMessage());
+            return null;
+        }
     }
     
     /**
@@ -271,6 +278,12 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
         // Check if they have different expiration dates
         String exp1 = extractExpirationDate(positions.get(0).getSymbol());
         String exp2 = extractExpirationDate(positions.get(1).getSymbol());
+        
+        // If parsing failed, skip this group
+        if (exp1 == null || exp2 == null) {
+            log.warn("Failed to parse expiration dates for positions - skipping group");
+            return false;
+        }
         
         if (exp1.equals(exp2)) {
             return false; // Same expiration = vertical spread, not calendar
@@ -368,87 +381,32 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
                 return false;
             }
             
-            // Calculate the credit for exiting the calendar spread (opposite of InitiateTradesLambda debit calculation)
-            double credit = calculateExitCredit(positions);
-            if (credit <= 0) {
-                log.warn("Invalid credit calculation for exit order: {}", credit);
-                return false;
-            }
-            
-            // Round to 2 decimal places (same as InitiateTradesLambda)
-            double limitPrice = Math.round(credit * 100.0) / 100.0;
-            
-            // Build legs array for multi-leg order
-            List<Map<String, Object>> legs = new ArrayList<>();
-            int totalQuantity = 0;
-            
+            // Convert Position objects to Map format for reusable utility
+            List<Map<String, Object>> positionMaps = new ArrayList<>();
             for (Position position : positions) {
-                // Determine opposite side and position intent for exit
-                String exitSide = position.getSide().equals("long") ? "sell" : "buy";
-                String positionIntent = position.getSide().equals("long") ? "sell_to_close" : "buy_to_close";
-                
-                // Build leg for multi-leg order
-                Map<String, Object> leg = new HashMap<>();
-                leg.put("symbol", position.getSymbol());
-                leg.put("ratio_qty", Math.abs(position.getQty().intValue()));
-                leg.put("side", exitSide);
-                leg.put("position_intent", positionIntent);
-                
-                legs.add(leg);
-                totalQuantity = Math.max(totalQuantity, Math.abs(position.getQty().intValue()));
+                Map<String, Object> positionMap = new HashMap<>();
+                positionMap.put("symbol", position.getSymbol());
+                positionMap.put("qty", position.getQty().toString());
+                positionMap.put("side", position.getSide());
+                positionMaps.add(positionMap);
             }
             
-            if (legs.isEmpty()) {
-                log.warn("No valid legs generated for multi-leg order");
+            // Use reusable utility to create and submit market order
+            String exitOrderJson = ExitOrderUtils.createCalendarSpreadExitOrder(positionMaps, "market");
+            log.info("Created exit order JSON: {}", exitOrderJson);
+            
+            // Use existing submitOrder pattern from InitiateTradesLambda
+            Map<String, Object> orderResult = ExitOrderUtils.submitExitOrder(exitOrderJson, credentials);
+            String orderId = (String) orderResult.get("orderId");
+            String status = (String) orderResult.get("status");
+            
+            if (orderId != null && !orderId.isEmpty()) {
+                log.info("Successfully submitted multi-leg exit order with ID: {} (status: {})", orderId, status);
+                return true;
+            } else {
+                log.error("Failed to submit exit order - no order ID returned");
                 return false;
             }
-            
-            // Ensure GCD of ratio_qty values is 1 (Alpaca requirement)
-            int[] ratioQtys = legs.stream()
-                    .mapToInt(leg -> (Integer) leg.get("ratio_qty"))
-                    .toArray();
-            
-            int gcd = calculateGCD(ratioQtys);
-            
-            if (gcd > 1) {
-                // Simplify ratios by dividing by GCD
-                for (Map<String, Object> leg : legs) {
-                    int ratioQty = (Integer) leg.get("ratio_qty");
-                    leg.put("ratio_qty", ratioQty / gcd);
-                }
-                totalQuantity = totalQuantity / gcd;
-                log.info("Simplified ratio quantities by GCD of {}", gcd);
-            }
-            
-            // Validate that we have at least 2 legs for a multi-leg order
-            if (legs.size() < 2) {
-                log.warn("Multi-leg order requires at least 2 legs, found {}", legs.size());
-                return false;
-            }
-            
-            // Check for uncovered short legs (Alpaca restriction for Options Level 3)
-            boolean hasUncoveredShorts = checkForUncoveredShorts(legs);
-            if (hasUncoveredShorts) {
-                log.warn("Order contains uncovered short legs, which is not allowed for Options Level 3");
-                logToCloudWatch("UNCOVERED_SHORTS_ERROR", 
-                        "Order rejected due to uncovered short legs in multi-leg order");
-                return false;
-            }
-            
-            // Build multi-leg order request (same structure as InitiateTradesLambda)
-            Map<String, Object> mlegOrder = new HashMap<>();
-            mlegOrder.put("order_class", "mleg");
-            mlegOrder.put("type", "limit");
-            mlegOrder.put("time_in_force", "day");
-            mlegOrder.put("limit_price", limitPrice);
-            mlegOrder.put("qty", totalQuantity);
-            mlegOrder.put("legs", legs);
-            
-            // Submit multi-leg order
-            String orderJson = JsonUtils.toJson(mlegOrder);
-            String responseBody = AlpacaHttpClient.postAlpacaTrading("/orders", orderJson, credentials);
-            log.info("Successfully submitted multi-leg exit order: {}", responseBody);
-            return true;
             
         } catch (Exception e) {
             log.error("Error submitting multi-leg exit order: {}", e.getMessage(), e);

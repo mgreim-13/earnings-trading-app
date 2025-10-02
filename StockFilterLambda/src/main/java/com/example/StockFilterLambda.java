@@ -3,7 +3,7 @@ package com.example;
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 import com.trading.common.TradingErrorHandler;
-
+import com.trading.common.TradingCommonUtils;
 import com.trading.common.models.HistoricalBar;
 import com.trading.common.models.AlpacaCredentials;
 import com.trading.common.models.StockData;
@@ -18,6 +18,12 @@ import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 import java.time.LocalDate;
 import java.time.ZoneId;
+
+// Filter class imports
+import com.example.LiquidityFilter;
+import com.example.IVRatioFilter;
+import com.example.TermStructureFilter;
+import com.example.ExecutionSpreadFilter;
 
 /**
  * AWS Lambda function for filtering stocks based on volume, volatility, and options data.
@@ -41,12 +47,7 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
     private final DynamoDbClient dynamoDbClient = DynamoDbClient.create();
     
     public StockFilterLambda() {
-        String apiKey = System.getenv("ALPACA_API_KEY");
-        String secretKey = System.getenv("ALPACA_SECRET_KEY");
-        
-        this.credentials = new AlpacaCredentials();
-        this.credentials.setApiKey(apiKey);
-        this.credentials.setSecretKey(secretKey);
+        this.credentials = TradingCommonUtils.getAlpacaCredentials("trading/alpaca/credentials");
         this.commonUtils = new StockFilterCommonUtils(credentials);
         this.cacheManager = new CacheManager(credentials, commonUtils);
     }
@@ -360,8 +361,15 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
     
     private boolean evaluateLiquidityGatekeeper(String ticker, Context context) {
         try {
-            // Reuse existing liquidity filter logic
-            return evaluateLiquidityFilterWithCachedData(ticker, 0, null, null, context).isPassed();
+            // Get stock data for volume check
+            StockData stockData = cacheManager.getCachedStockData(ticker, context);
+            if (stockData == null) {
+                return false;
+            }
+            
+            // Use the proper LiquidityFilter class
+            LiquidityFilter liquidityFilter = new LiquidityFilter(credentials, commonUtils);
+            return liquidityFilter.hasOptionsLiquidity(ticker, context);
         } catch (Exception e) {
             context.getLogger().log("Error in liquidity gatekeeper for " + ticker + ": " + e.getMessage());
             return false;
@@ -370,8 +378,9 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
     
     private boolean evaluateIVRatioGatekeeper(String ticker, LocalDate earningsDate, Context context) {
         try {
-            // Reuse existing IV ratio filter logic
-            return evaluateIVRatioFilterWithCachedData(ticker, earningsDate, null, null, context).isPassed();
+            // Use the proper IVRatioFilter class
+            IVRatioFilter ivRatioFilter = new IVRatioFilter(credentials, commonUtils);
+            return ivRatioFilter.hasIVRatio(ticker, earningsDate, context);
         } catch (Exception e) {
             context.getLogger().log("Error in IV ratio gatekeeper for " + ticker + ": " + e.getMessage());
             return false;
@@ -380,8 +389,9 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
     
     private boolean evaluateTermStructureGatekeeper(String ticker, LocalDate earningsDate, Context context) {
         try {
-            // Reuse existing term structure filter logic
-            return evaluateTermStructureFilterWithCachedData(ticker, earningsDate, null, null, context).isPassed();
+            // Use the proper TermStructureFilter class
+            TermStructureFilter termStructureFilter = new TermStructureFilter(credentials, commonUtils);
+            return termStructureFilter.hasTermStructureBackwardation(ticker, earningsDate, context);
         } catch (Exception e) {
             context.getLogger().log("Error in term structure gatekeeper for " + ticker + ": " + e.getMessage());
             return false;
@@ -390,8 +400,9 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
     
     private boolean evaluateExecutionSpreadGatekeeper(String ticker, LocalDate earningsDate, Context context) {
         try {
-            // Reuse existing execution spread filter logic
-            return evaluateExecutionSpreadFilterWithCachedData(ticker, earningsDate, null, null, context).isPassed();
+            // Use the proper ExecutionSpreadFilter class
+            ExecutionSpreadFilter executionSpreadFilter = new ExecutionSpreadFilter(credentials, commonUtils);
+            return executionSpreadFilter.hasExecutionSpreadFeasibility(ticker, earningsDate, context).isPassed();
         } catch (Exception e) {
             context.getLogger().log("Error in execution spread gatekeeper for " + ticker + ": " + e.getMessage());
             return false;
@@ -456,9 +467,6 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
         // Add basic fields
         addBasicFieldsToDynamoDbItem(dynamoDbItem, recommendation, scanDate);
         
-        // Add filter results
-        addFilterResultsToDynamoDbItem(dynamoDbItem, recommendation);
-        
         return dynamoDbItem;
     }
     
@@ -467,34 +475,14 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
      */
     private void addBasicFieldsToDynamoDbItem(Map<String, AttributeValue> dynamoDbItem, Map<String, Object> recommendation, String scanDate) {
         String tickerSymbol = (String) recommendation.get("ticker");
-        String recommendationStatus = (String) recommendation.get("status");
-        Double avgVolume = (Double) recommendation.get("avgVolume");
-        String earningsDate = (String) recommendation.get("earningsDate");
         Double positionSizePercentage = (Double) recommendation.get("positionSizePercentage");
         
         dynamoDbItem.put("ticker", AttributeValue.builder().s(tickerSymbol).build());
         dynamoDbItem.put("scanDate", AttributeValue.builder().s(scanDate).build());
-        dynamoDbItem.put("status", AttributeValue.builder().s(recommendationStatus).build());
-        dynamoDbItem.put("avgVolume", AttributeValue.builder().n(String.valueOf(avgVolume)).build());
-        dynamoDbItem.put("earningsDate", AttributeValue.builder().s(earningsDate).build());
         
-        // Add position sizing data
+        // Add position sizing data (only field used by downstream Lambdas)
         if (positionSizePercentage != null) {
             dynamoDbItem.put("positionSizePercentage", AttributeValue.builder().n(String.valueOf(positionSizePercentage)).build());
-        }
-    }
-                
-    /**
-     * Add filter results to DynamoDB item
-     */
-    private void addFilterResultsToDynamoDbItem(Map<String, AttributeValue> dynamoDbItem, Map<String, Object> recommendation) {
-        for (String key : recommendation.keySet()) {
-            if (key.endsWith("Passed")) {
-                Object value = recommendation.get(key);
-                if (value instanceof Boolean) {
-                    dynamoDbItem.put(key, AttributeValue.builder().bool((Boolean) value).build());
-                }
-            }
         }
     }
     
@@ -522,7 +510,7 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
         
         // Check options liquidity using cached data
         boolean optionsLiquidityPassed = false;
-        if (!shortChain.isEmpty() && !longChain.isEmpty()) {
+        if (shortChain != null && longChain != null && !shortChain.isEmpty() && !longChain.isEmpty()) {
             // Use cached data to check options liquidity
             optionsLiquidityPassed = hasOptionsLiquidityWithCachedData(ticker, shortChain, longChain, context);
         }
@@ -572,7 +560,7 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
             Map<String, com.trading.common.models.OptionSnapshot> shortChain, 
             Map<String, com.trading.common.models.OptionSnapshot> longChain, Context context) {
         try {
-            if (shortChain.isEmpty() || longChain.isEmpty()) {
+            if (shortChain == null || longChain == null || shortChain.isEmpty() || longChain.isEmpty()) {
                 context.getLogger().log("No option data available for IV ratio check for " + ticker);
                 return evaluateFilter("IV_Ratio", false, 2, context, ticker);
             }
@@ -648,7 +636,7 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
             Map<String, com.trading.common.models.OptionSnapshot> shortChain, 
             Map<String, com.trading.common.models.OptionSnapshot> longChain, Context context) {
         try {
-            if (shortChain.isEmpty() || longChain.isEmpty()) {
+            if (shortChain == null || longChain == null || shortChain.isEmpty() || longChain.isEmpty()) {
                 context.getLogger().log("No option data available for term structure check for " + ticker);
                 return evaluateFilter("Term_Structure", false, 1, context, ticker);
             }

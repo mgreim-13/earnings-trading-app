@@ -70,7 +70,7 @@ dynamodb-local:
 # Create DynamoDB table locally
 create-table-local:
 	aws dynamodb create-table \
-		--table-name EarningsTable \
+		--table-name earnings-table \
 		--attribute-definitions \
 			AttributeName=scanDate,AttributeType=S \
 			AttributeName=ticker,AttributeType=S \

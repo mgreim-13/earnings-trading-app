@@ -51,22 +51,55 @@ public class OptionSymbolUtils {
         // Extract components
         String type = symbol.substring(optionTypeIndex, optionTypeIndex + 1);
         String strikeStr = symbol.substring(optionTypeIndex + 1);
-        String dateStr = symbol.substring(optionTypeIndex - 8, optionTypeIndex);
-        String underlying = symbol.substring(0, optionTypeIndex - 8);
+        
+        // Find the date - it should be 6 digits before the option type
+        // Look for 6 consecutive digits before the option type
+        String dateStr = "";
+        String underlying = "";
+        for (int i = optionTypeIndex - 6; i >= 0; i--) {
+            if (i + 6 <= optionTypeIndex) {
+                String candidate = symbol.substring(i, i + 6);
+                if (candidate.matches("\\d{6}")) {
+                    dateStr = candidate;
+                    underlying = symbol.substring(0, i);
+                    break;
+                }
+            }
+        }
+        
+        if (dateStr.isEmpty()) {
+            throw new IllegalArgumentException("Invalid option symbol format - cannot find 6-digit date: " + symbol);
+        }
         
         // Validate option type
         if (!type.equals("C") && !type.equals("P")) {
             throw new IllegalArgumentException("Invalid option type: " + type + " in symbol: " + symbol);
         }
         
-        // Parse date (YYYYMMDD -> YYYY-MM-DD)
-        int year = Integer.parseInt(dateStr.substring(0, 4));
-        int month = Integer.parseInt(dateStr.substring(4, 6));
-        int day = Integer.parseInt(dateStr.substring(6, 8));
+        // Parse date (YYMMDD -> YYYY-MM-DD)
+        int year = Integer.parseInt(dateStr.substring(0, 2));
+        int month = Integer.parseInt(dateStr.substring(2, 4));
+        int day = Integer.parseInt(dateStr.substring(4, 6));
+        
+        // Convert 2-digit year to 4-digit year (assume 20xx for years 00-99)
+        if (year < 50) {
+            year += 2000;
+        } else {
+            year += 1900;
+        }
+        
         String expiration = String.format("%04d-%02d-%02d", year, month, day);
         
-        // Parse strike (convert to decimal)
-        double strike = Double.parseDouble(strikeStr);
+        // Parse strike (convert to decimal) - handle zero-padded format
+        // Alpaca uses 8-digit zero-padded strikes (e.g., "00115000" = 115.0)
+        double strike;
+        if (strikeStr.length() == 8) {
+            // Convert from 8-digit zero-padded format (e.g., "00115000" -> 115.0)
+            strike = Double.parseDouble(strikeStr) / 1000.0;
+        } else {
+            // Handle regular format
+            strike = Double.parseDouble(strikeStr);
+        }
         
         Map<String, Object> result = new HashMap<>();
         result.put("expiration", expiration);

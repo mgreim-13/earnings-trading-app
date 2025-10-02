@@ -9,7 +9,7 @@ Globals:
     Runtime: java21
     Environment:
       Variables:
-        FILTERED_TABLE: !Ref FilteredTickersTable
+        FILTERED_TABLE: 'filtered-tickers-table'
         ALPACA_SECRET_NAME: !Ref AlpacaSecretName
         ALPACA_API_URL: https://paper-api.alpaca.markets/v2
 
@@ -22,7 +22,7 @@ Parameters:
   
   FilteredTickersTableName:
     Type: String
-    Default: FilteredTickersTable
+    Default: 'filtered-tickers-table'
     Description: Name of the DynamoDB table containing filtered tickers
   
   AlpacaSecretName:
@@ -31,29 +31,7 @@ Parameters:
     Description: Name of the Secrets Manager secret containing Alpaca API keys
 
 Resources:
-  # DynamoDB Tables
-  FilteredTickersTable:
-    Type: AWS::DynamoDB::Table
-    Properties:
-      TableName: !Sub '${Environment}-filtered-stocks'
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: scanDate
-          AttributeType: S
-        - AttributeName: ticker
-          AttributeType: S
-      KeySchema:
-        - AttributeName: scanDate
-          KeyType: HASH
-        - AttributeName: ticker
-          KeyType: RANGE
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: true
-      Tags:
-        - Key: Environment
-          Value: Production
-        - Key: Application
-          Value: TradingSystem
+  # Table is created dynamically by MarketSchedulerLambda in main CloudFormation template
 
 
   # Lambda Function
@@ -68,12 +46,12 @@ Resources:
       Timeout: 300
       Environment:
         Variables:
-          FILTERED_TABLE: !Ref FilteredTickersTable
+          FILTERED_TABLE: 'filtered-tickers-table'
           ALPACA_SECRET_NAME: !Ref AlpacaSecretName
           ALPACA_API_URL: https://paper-api.alpaca.markets/v2
       Policies:
         - DynamoDBReadPolicy:
-            TableName: !Ref FilteredTickersTable
+            TableName: 'filtered-tickers-table'
         - SecretsManagerReadWrite
         - CloudWatchLogsFullAccess
       Tags:
@@ -109,7 +87,7 @@ Resources:
                 Action:
                   - dynamodb:Query
                   - dynamodb:Scan
-                Resource: !GetAtt FilteredTickersTable.Arn
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/filtered-tickers-table'
               - Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
@@ -129,8 +107,8 @@ Outputs:
       Name: !Sub '${AWS::StackName}-InitiateTradesLambdaArn'
 
   FilteredTickersTableName:
-    Description: Name of the FilteredTickersTable
-    Value: !Ref FilteredTickersTable
+    Description: Name of the filtered tickers table
+    Value: 'filtered-tickers-table'
     Export:
       Name: !Sub '${AWS::StackName}-FilteredTickersTableName'
 

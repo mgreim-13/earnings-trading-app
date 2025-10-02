@@ -7,8 +7,8 @@ echo "🧪 Running Cache Logic Tests for StockFilterLambda"
 echo "=================================================="
 
 # Set test environment variables
-export EARNINGS_TABLE="test-earnings-table"
-export FILTERED_TABLE="test-filtered-table"
+export EARNINGS_TABLE="earnings-table"
+export FILTERED_TABLE="filtered-tickers-table"
 export VOLUME_THRESHOLD="2000000"
 export MIN_SCORE_THRESHOLD="7"
 export ALPACA_API_KEY="test-api-key"

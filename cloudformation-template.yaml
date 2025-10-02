@@ -151,8 +151,8 @@ Resources:
           FINNHUB_SECRET_NAME: !Ref FinnhubSecretName
           ENVIRONMENT: !Ref Environment
           ALPACA_SECRET_NAME: !Ref AlpacaSecretName
-          EARNINGS_TABLE: !Sub '${Environment}-earnings-table'
-          FILTERED_TABLE: !Sub '${Environment}-filtered-tickers-table'
+          EARNINGS_TABLE: 'earnings-table'
+          FILTERED_TABLE: 'filtered-tickers-table'
       VpcConfig:
         !If
           - HasVpcConfig
@@ -177,7 +177,7 @@ Resources:
       MemorySize: 512
       Environment:
         Variables:
-          DYNAMODB_TABLE: !Sub '${Environment}-earnings-table'
+          DYNAMODB_TABLE: 'earnings-table'
           FINNHUB_SECRET_NAME: !Ref FinnhubSecretName
           ALPACA_SECRET_NAME: !Ref AlpacaSecretName
           FINNHUB_API_URL: 'https://finnhub.io/api/v1/calendar/earnings'
@@ -197,8 +197,8 @@ Resources:
       MemorySize: 512
       Environment:
         Variables:
-          EARNINGS_TABLE: !Sub '${Environment}-earnings-table'
-          FILTERED_TABLE: !Sub '${Environment}-filtered-tickers-table'
+          EARNINGS_TABLE: 'earnings-table'
+          FILTERED_TABLE: 'filtered-tickers-table'
           ALPACA_SECRET_NAME: !Ref AlpacaSecretName
           FINNHUB_SECRET_NAME: !Ref FinnhubSecretName
           ENVIRONMENT: !Ref Environment
@@ -219,7 +219,7 @@ Resources:
         Variables:
           ALPACA_SECRET_NAME: !Ref AlpacaSecretName
           PAPER_TRADING: 'true'
-          FILTERED_TABLE: !Sub '${Environment}-filtered-tickers-table'
+          FILTERED_TABLE: 'filtered-tickers-table'
 
   MonitorTradesLambda:
     Type: AWS::Lambda::Function
@@ -738,12 +738,12 @@ Outputs:
   
   EarningsDataTableName:
     Description: 'Earnings Data DynamoDB Table Name (created dynamically)'
-    Value: !Sub '${Environment}-earnings-data'
+    Value: 'earnings-table'
     Export:
       Name: !Sub '${Environment}-EarningsDataTableName'
   
   FilteredStocksTableName:
     Description: 'Filtered Stocks DynamoDB Table Name (created dynamically)'
-    Value: !Sub '${Environment}-filtered-stocks'
+    Value: 'filtered-tickers-table'
     Export:
       Name: !Sub '${Environment}-FilteredStocksTableName'

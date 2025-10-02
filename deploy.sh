@@ -36,6 +36,15 @@ fi
 
 echo -e "${YELLOW}📦 Building Lambda packages...${NC}"
 
+# Clean up any existing JAR files from previous builds
+cleanup_old_jars() {
+    echo -e "Cleaning up old JAR files..."
+    rm -f *.jar
+    echo -e "${GREEN}✅ Cleaned up old JAR files${NC}"
+}
+
+cleanup_old_jars
+
 # Build all Lambda functions
 build_lambda() {
     local lambda_name=$1
@@ -54,10 +63,40 @@ build_lambda() {
     # Clean and build
     mvn clean package -DskipTests
     
-    # Create deployment package
-    cd target
-    jar -cf "../${lambda_name}.jar" -C classes .
-    cd ..
+    # Determine the correct JAR file to use
+    local jar_file=""
+    if ls target/*-shaded.jar 1> /dev/null 2>&1; then
+        # Use shaded JAR if available
+        jar_file=$(ls target/*-shaded.jar | head -1)
+        echo -e "Using shaded JAR: $(basename "$jar_file")"
+    else
+        # Find the main JAR file (exclude original- prefix JARs)
+        for jar in target/*.jar; do
+            if [[ ! $(basename "$jar") =~ ^original- ]]; then
+                jar_file="$jar"
+                break
+            fi
+        done
+        echo -e "Using main JAR: $(basename "$jar_file")"
+    fi
+    
+    if [ -z "$jar_file" ] || [ ! -f "$jar_file" ]; then
+        echo -e "${RED}❌ No valid JAR file found in $lambda_dir/target/${NC}"
+        exit 1
+    fi
+    
+    # Copy JAR to root directory with consistent naming
+    cp "$jar_file" "../${lambda_name}.jar"
+    
+    # Verify critical classes are present (for debugging)
+    echo -e "Verifying JAR contents..."
+    if [[ "$lambda_name" == "stock-filter" ]]; then
+        if jar -tf "../${lambda_name}.jar" | grep -q "software/amazon/awssdk/services/dynamodb/DynamoDbClient"; then
+            echo -e "${GREEN}✅ DynamoDB client found in JAR${NC}"
+        else
+            echo -e "${RED}❌ DynamoDB client NOT found in JAR${NC}"
+        fi
+    fi
     
     echo -e "${GREEN}✅ Built ${lambda_name}${NC}"
     cd ..
@@ -70,6 +109,26 @@ build_lambda "stock-filter" "StockFilterLambda" "com.example.StockFilterLambda"
 build_lambda "initiate-trades" "InitiateTradesLambda" "com.example.InitiateTradesLambda"
 build_lambda "monitor-trades" "MonitorTradesLambda" "com.example.MonitorTradesLambda"
 build_lambda "initiate-exit-trades" "InitiateExitTradesLambda" "com.trading.lambda.InitiateExitTradesLambda"
+
+# Verify all JAR files were created successfully
+echo -e "${YELLOW}🔍 Verifying all JAR files were created...${NC}"
+required_jars=("market-scheduler.jar" "scan-earnings.jar" "stock-filter.jar" "initiate-trades.jar" "monitor-trades.jar" "initiate-exit-trades.jar")
+missing_jars=()
+
+for jar in "${required_jars[@]}"; do
+    if [ ! -f "$jar" ]; then
+        missing_jars+=("$jar")
+    else
+        echo -e "${GREEN}✅ Found $jar${NC}"
+    fi
+done
+
+if [ ${#missing_jars[@]} -gt 0 ]; then
+    echo -e "${RED}❌ Missing JAR files: ${missing_jars[*]}${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}✅ All JAR files created successfully${NC}"
 
 echo -e "${YELLOW}☁️  Deploying CloudFormation stack...${NC}"
 
@@ -104,12 +163,12 @@ update_lambda_code() {
 }
 
 # Update all lambda codes
-update_lambda_code "market-scheduler" "MarketSchedulerLambda/market-scheduler.jar"
-update_lambda_code "scan-earnings" "ScanEarningsLambda/scan-earnings.jar"
-update_lambda_code "stock-filter" "StockFilterLambda/stock-filter.jar"
-update_lambda_code "initiate-trades" "InitiateTradesLambda/initiate-trades.jar"
-update_lambda_code "monitor-trades" "MonitorTradesLambda/monitor-trades.jar"
-update_lambda_code "initiate-exit-trades" "InitiateExitTradesLambda/initiate-exit-trades.jar"
+update_lambda_code "market-scheduler" "market-scheduler.jar"
+update_lambda_code "scan-earnings" "scan-earnings.jar"
+update_lambda_code "stock-filter" "stock-filter.jar"
+update_lambda_code "initiate-trades" "initiate-trades.jar"
+update_lambda_code "monitor-trades" "monitor-trades.jar"
+update_lambda_code "initiate-exit-trades" "initiate-exit-trades.jar"
 
 echo -e "${YELLOW}🔐 Setting up secrets...${NC}"
 

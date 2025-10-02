@@ -7,6 +7,7 @@ import com.trading.common.JsonUtils;
 import com.trading.common.TradingErrorHandler;
 import com.trading.common.AlpacaHttpClient;
 import com.trading.common.models.AlpacaCredentials;
+import com.trading.common.CommonConstants;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.BatchWriteItemRequest;
@@ -136,8 +137,14 @@ public class ScanEarningsLambda implements RequestHandler<Map<String, Object>, S
 
         // Parse the response - Finnhub returns {"earningsCalendar": [...]}
         com.fasterxml.jackson.databind.JsonNode responseNode = JsonUtils.parseJson(responseBody);
+        com.fasterxml.jackson.databind.JsonNode earningsNode = responseNode.get("earningsCalendar");
+        
+        if (earningsNode == null || earningsNode.isNull()) {
+            return new ArrayList<>();
+        }
+        
         @SuppressWarnings("unchecked")
-        List<Map<String, Object>> earningsList = (List<Map<String, Object>>) responseNode.get("earningsCalendar").traverse().readValueAs(List.class);
+        List<Map<String, Object>> earningsList = CommonConstants.OBJECT_MAPPER.convertValue(earningsNode, List.class);
 
         if (earningsList == null) {
             return new ArrayList<>();
@@ -145,6 +152,14 @@ public class ScanEarningsLambda implements RequestHandler<Map<String, Object>, S
 
         return earningsList.stream()
             .map(this::mapToEarningsRecord)
+            .filter(record -> record.getTicker() != null && !record.getTicker().isEmpty())
+            .collect(Collectors.toMap(
+                record -> record.getTicker(), // Use ticker as key for deduplication
+                record -> record,            // Keep the record as value
+                (existing, replacement) -> existing // Keep first occurrence on duplicate
+            ))
+            .values()
+            .stream()
             .collect(Collectors.toList());
     }
 
