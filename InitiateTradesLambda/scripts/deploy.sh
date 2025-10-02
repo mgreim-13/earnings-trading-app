@@ -97,7 +97,7 @@ deploy_with_sam() {
         --region $REGION \
         --capabilities CAPABILITY_IAM \
         --parameter-overrides \
-            FilteredTickersTableName=FilteredTickersTable \
+            FilteredTickersTableName=filtered-tickers-table \
             OrdersTableName=OrdersTable \
             AlpacaSecretName=trading/alpaca/credentials \
         --confirm-changeset

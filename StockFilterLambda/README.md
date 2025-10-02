@@ -1,6 +1,6 @@
 # Stock Filter Lambda
 
-A sophisticated Java-based AWS Lambda function for filtering stocks using a comprehensive gatekeeper system. The function retrieves tickers from the DynamoDB `EarningsTable`, applies multiple mandatory and optional filters, and writes results to the `FilteredTickersTable` with proportional portfolio allocation.
+A sophisticated Java-based AWS Lambda function for filtering stocks using a comprehensive gatekeeper system. The function retrieves tickers from the DynamoDB `earnings-table`, applies multiple mandatory and optional filters, and writes results to the `filtered-tickers-table` with proportional portfolio allocation.
 
 ## Features
 
@@ -29,7 +29,7 @@ A sophisticated Java-based AWS Lambda function for filtering stocks using a comp
 ## Architecture
 
 ```
-Step Functions → StockFilterLambda → DynamoDB (EarningsTable)
+Step Functions → StockFilterLambda → DynamoDB (earnings-table)
                       ↓
                  Alpaca API (Live Market Data)
                       ↓
@@ -39,7 +39,7 @@ Step Functions → StockFilterLambda → DynamoDB (EarningsTable)
                       ↓
                  Proportional Portfolio Allocation (30% max)
                       ↓
-                 DynamoDB (FilteredTickersTable - cleaned up at 4:00 PM EST)
+                 DynamoDB (filtered-tickers-table - cleaned up at 4:00 PM EST)
 ```
 
 ## Prerequisites
@@ -105,7 +105,7 @@ mvn test
 ```bash
 # Create earnings table
 aws dynamodb create-table \
-    --table-name dev-EarningsTable \
+    --table-name earnings-table \
     --attribute-definitions \
         AttributeName=scanDate,AttributeType=S \
         AttributeName=ticker,AttributeType=S \
@@ -133,12 +133,12 @@ aws dynamodb create-table \
 ```bash
 # Add sample earnings data
 aws dynamodb put-item \
-    --table-name dev-EarningsTable \
+    --table-name earnings-table \
     --item '{"scanDate": {"S": "2024-01-15"}, "ticker": {"S": "AAPL"}}' \
     --endpoint-url http://localhost:8000
 
 aws dynamodb put-item \
-    --table-name dev-EarningsTable \
+    --table-name earnings-table \
     --item '{"scanDate": {"S": "2024-01-15"}, "ticker": {"S": "MSFT"}}' \
     --endpoint-url http://localhost:8000
 ```

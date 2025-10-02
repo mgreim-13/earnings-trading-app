@@ -506,7 +506,7 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
                     writeItemToDynamoDb(dynamoDbItem);
                     successfullyWrittenCount++;
                 } catch (Exception e) {
-                    context.getLogger().log("Error writing result to FilteredTickersTable: " + e.getMessage());
+                    context.getLogger().log("Error writing result to filtered-tickers-table: " + e.getMessage());
                 }
             }
         }

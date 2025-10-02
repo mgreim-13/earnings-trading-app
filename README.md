@@ -210,8 +210,8 @@ Final Recommendation
 - **Rate Limiting**: Respects API limits with automatic retry mechanisms
 
 ### **DynamoDB Tables**
-- **dev-earnings-data**: Temporary storage for earnings calendar data (cleaned up at 4:00 PM EST)
-- **dev-filtered-stocks**: Temporary storage for filtered stock recommendations (cleaned up at 4:00 PM EST)
+- **earnings-table**: Temporary storage for earnings calendar data (cleaned up at 4:00 PM EST)
+- **filtered-tickers-table**: Temporary storage for filtered stock recommendations (cleaned up at 4:00 PM EST)
 
 ## 💰 Cost Analysis
 

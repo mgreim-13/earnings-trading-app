@@ -8,7 +8,7 @@ A Java-based AWS Lambda function for initiating calendar spread trades in a trad
 - **Risk Management**: Calculates position sizes based on 2% of account value
 - **Market Hours Check**: Only executes trades when market is open
 - **Paper Trading**: Uses Alpaca's paper trading environment for safe testing
-- **DynamoDB Integration**: Reads from FilteredTickersTable and writes to OrdersTable
+- **DynamoDB Integration**: Reads from filtered-tickers-table and writes to OrdersTable
 - **Error Handling**: Robust error handling with detailed logging
 
 ## Architecture
@@ -18,7 +18,7 @@ Step Functions (3:45 PM EST)
     ↓
 InitiateTradesLambda
     ↓
-DynamoDB FilteredTickersTable (Read)
+DynamoDB filtered-tickers-table (Read)
     ↓
 Alpaca APIs (Options, Quotes, Account, Orders)
     ↓
@@ -51,7 +51,7 @@ mvn clean package
 Create a `.env` file or set environment variables:
 
 ```bash
-export FILTERED_TABLE="FilteredTickersTable"
+export FILTERED_TABLE="filtered-tickers-table"
 export ORDERS_TABLE="OrdersTable"
 export ALPACA_SECRET_NAME="trading/alpaca/credentials"
 export ALPACA_API_URL="https://paper-api.alpaca.markets/v2"
@@ -77,9 +77,9 @@ aws secretsmanager create-secret \
 
 ```bash
 # Tables are created automatically, but for reference:
-# Create FilteredTickersTable
+# Create filtered-tickers-table
 aws dynamodb create-table \
-    --table-name FilteredTickersTable \
+    --table-name filtered-tickers-table \
     --attribute-definitions \
         AttributeName=scanDate,AttributeType=S \
         AttributeName=ticker,AttributeType=S \
@@ -128,7 +128,7 @@ Create test data in DynamoDB Local:
 # Add test tickers
 aws dynamodb put-item \
     --endpoint-url http://localhost:8000 \
-    --table-name FilteredTickersTable \
+    --table-name filtered-tickers-table \
     --item '{
         "scanDate": {"S": "2025-09-26"},
         "ticker": {"S": "AAPL"},
@@ -138,7 +138,7 @@ aws dynamodb put-item \
 
 aws dynamodb put-item \
     --endpoint-url http://localhost:8000 \
-    --table-name FilteredTickersTable \
+    --table-name filtered-tickers-table \
     --item '{
         "scanDate": {"S": "2025-09-26"},
         "ticker": {"S": "GOOGL"},
@@ -172,7 +172,7 @@ Create `env.json` for local testing:
 ```json
 {
     "InitiateTradesLambda": {
-        "FILTERED_TABLE": "FilteredTickersTable",
+        "FILTERED_TABLE": "filtered-tickers-table",
         "ORDERS_TABLE": "OrdersTable",
         "ALPACA_SECRET_NAME": "alpaca-api-keys",
         "ALPACA_API_URL": "https://paper-api.alpaca.markets/v2"
@@ -218,7 +218,7 @@ aws lambda create-function \
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `FILTERED_TABLE` | DynamoDB table for filtered tickers | `FilteredTickersTable` |
+| `FILTERED_TABLE` | DynamoDB table for filtered tickers | `filtered-tickers-table` |
 | `ORDERS_TABLE` | DynamoDB table for order details | `OrdersTable` |
 | `ALPACA_SECRET_NAME` | Secrets Manager secret name | `trading/alpaca/credentials` |
 | `ALPACA_API_URL` | Alpaca API base URL | `https://paper-api.alpaca.markets/v2` |
@@ -237,7 +237,7 @@ The Lambda function requires the following permissions:
                 "dynamodb:Query",
                 "dynamodb:Scan"
             ],
-            "Resource": "arn:aws:dynamodb:*:*:table/FilteredTickersTable"
+            "Resource": "arn:aws:dynamodb:*:*:table/filtered-tickers-table"
         },
         {
             "Effect": "Allow",

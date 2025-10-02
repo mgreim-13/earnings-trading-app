@@ -121,7 +121,7 @@ Create `events/env-vars.json`:
     "ALPACA_API_URL": "https://paper-api.alpaca.markets",
     "FINNHUB_SECRET_NAME": "finnhub-api-key",
     "ALPACA_SECRET_NAME": "alpaca-api-keys",
-    "DYNAMODB_TABLE": "EarningsTable"
+    "DYNAMODB_TABLE": "earnings-table"
   }
 }
 ```
@@ -142,7 +142,7 @@ sam local start-dynamodb
 
 ```bash
 aws dynamodb create-table \
-  --table-name EarningsTable \
+  --table-name earnings-table \
   --attribute-definitions \
     AttributeName=scanDate,AttributeType=S \
     AttributeName=ticker,AttributeType=S \
