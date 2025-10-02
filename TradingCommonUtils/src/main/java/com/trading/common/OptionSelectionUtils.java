@@ -255,8 +255,8 @@ public class OptionSelectionUtils {
             return -1.0;
         }
         
-        // Reject spreads > 20% as they indicate poor liquidity
-        if (!PriceUtils.isSpreadAcceptable(bid, ask, 0.20)) {
+        // Reject spreads > 10% as they indicate poor liquidity
+        if (!PriceUtils.isSpreadAcceptable(bid, ask, 0.10)) {
             return -1.0;
         }
         

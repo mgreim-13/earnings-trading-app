@@ -36,13 +36,13 @@ public class LiquidityFilter {
         this.credentials = credentials;
         this.commonUtils = commonUtils;
         
-        // Load thresholds from environment - Updated for earnings calendar spreads
-        this.VOLUME_THRESHOLD = Double.parseDouble(System.getenv().getOrDefault("VOLUME_THRESHOLD", "2000000")); // Increased for better liquidity
-        this.BID_ASK_THRESHOLD = Double.parseDouble(System.getenv().getOrDefault("BID_ASK_THRESHOLD", "0.08")); // 60% wider tolerance for earnings volatility
-        this.QUOTE_DEPTH_THRESHOLD = Long.parseLong(System.getenv().getOrDefault("QUOTE_DEPTH_THRESHOLD", "100")); // 2x higher for better fills during volatility
-        this.MIN_DAILY_OPTION_TRADES = Long.parseLong(System.getenv().getOrDefault("MIN_DAILY_OPTION_TRADES", "500")); // 10x higher for earnings options activity
-        this.MIN_STOCK_PRICE = Double.parseDouble(System.getenv().getOrDefault("MIN_STOCK_PRICE", "25.0")); // Tighter range for better liquidity
-        this.MAX_STOCK_PRICE = Double.parseDouble(System.getenv().getOrDefault("MAX_STOCK_PRICE", "500.0")); // Tighter range for better liquidity
+        // Load thresholds from central configuration - Updated for earnings calendar spreads
+        this.VOLUME_THRESHOLD = FilterThresholds.VOLUME_THRESHOLD; // 1.5M shares for adequate liquidity
+        this.BID_ASK_THRESHOLD = FilterThresholds.BID_ASK_THRESHOLD; // 5% spread threshold for tighter liquidity requirements
+        this.QUOTE_DEPTH_THRESHOLD = FilterThresholds.QUOTE_DEPTH_THRESHOLD; // 2x higher for better fills during volatility
+        this.MIN_DAILY_OPTION_TRADES = FilterThresholds.MIN_DAILY_OPTION_TRADES; // 10x higher for earnings options activity
+        this.MIN_STOCK_PRICE = FilterThresholds.MIN_STOCK_PRICE; // Tighter range for better liquidity
+        this.MAX_STOCK_PRICE = FilterThresholds.MAX_STOCK_PRICE; // Tighter range for better liquidity
     }
     
     /**
@@ -70,8 +70,9 @@ public class LiquidityFilter {
             boolean hasQuoteDepth = optionsData.hasQuoteDepth;
             boolean hasTradeActivity = optionsData.hasTradeActivity;
             
-            boolean hasLiquidity = hasSufficientVolume && hasReasonablePrice && 
-                                 hasTightSpreads && hasQuoteDepth && hasTradeActivity;
+            // Make liquidity filter more lenient - only require volume, price, and spreads
+            // Quote depth and trade activity are nice-to-have but not required
+            boolean hasLiquidity = hasSufficientVolume && hasReasonablePrice && hasTightSpreads;
             
             context.getLogger().log(ticker + " options liquidity check: " +
                 "volume=" + String.format("%.0f", stockData.getAverageVolume()) + " (" + hasSufficientVolume + ") " +

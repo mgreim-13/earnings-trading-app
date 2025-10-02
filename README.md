@@ -99,24 +99,24 @@ The StockFilterLambda uses a sophisticated **6-factor gatekeeper system** that e
 - **Average Daily Volume**: Minimum 2M shares (configurable)
 - **Stock Price Range**: $20-$1000 for optimal liquidity
 - **Options Spread Analysis**: Tight bid-ask spreads required
-- **Quote Depth**: Minimum 100 contracts on each side
+- **Quote Depth**: Minimum 200 contracts on each side
 - **Trade Activity**: Recent options trading activity required
 
 ### **Gatekeeper 2: IV Ratio Filter** 📊
 **Purpose**: Identifies stocks with elevated implied volatility vs historical volatility
-- **IV30/RV30 Ratio**: Must be > 1.25 (25% premium over realized volatility)
+- **IV30/RV30 Ratio**: Must be > 1.20 (20% premium over realized volatility)
 - **Data Source**: 30-day implied volatility vs 30-day realized volatility
 - **Rationale**: Higher IV suggests market expects significant price movement
 
 ### **Gatekeeper 3: Term Structure Filter** 📈
 **Purpose**: Detects volatility backwardation (earnings week IV > longer-term IV)
 - **Backwardation Detection**: Earnings week IV > max(IV30, IV60)
-- **Minimum Slope**: 0.025 (2.5% backwardation required)
+- **Minimum Slope**: 0.05 (5% backwardation required)
 - **Rationale**: Backwardation indicates market expects earnings volatility
 
 ### **Gatekeeper 4: Execution Spread Filter** 💰
 **Purpose**: Ensures profitable trade execution with reasonable spreads
-- **Debit-to-Price Ratio**: Maximum 5% of stock price
+- **Debit-to-Price Ratio**: Maximum 4% of stock price
 - **Dynamic Threshold**: Based on stock price and volatility
 - **Net Theta Analysis**: Positive theta for time decay benefit
 - **Strike Selection**: ATM strikes for maximum liquidity
@@ -144,27 +144,27 @@ Environment:
   Variables:
     # Liquidity Filter
     VOLUME_THRESHOLD: '2000000'           # Minimum daily volume
-    MIN_STOCK_PRICE: '20.0'               # Minimum stock price
-    MAX_STOCK_PRICE: '1000.0'             # Maximum stock price
+    MIN_STOCK_PRICE: '30.0'               # Minimum stock price
+    MAX_STOCK_PRICE: '400.0'             # Maximum stock price
     BID_ASK_THRESHOLD: '0.08'             # Maximum bid-ask spread
-    QUOTE_DEPTH_THRESHOLD: '100'          # Minimum quote depth
+    QUOTE_DEPTH_THRESHOLD: '200'          # Minimum quote depth
     
     # IV Ratio Filter
-    IV_RATIO_THRESHOLD: '1.25'            # Minimum IV30/RV30 ratio
+    IV_RATIO_THRESHOLD: '1.20'            # Minimum IV30/RV30 ratio
     
     # Term Structure Filter
-    SLOPE_THRESHOLD: '0.025'              # Minimum backwardation
+    SLOPE_THRESHOLD: '0.05'              # Minimum backwardation
     
     # Execution Spread Filter
-    MAX_DEBIT_TO_PRICE_RATIO: '0.05'      # Maximum debit/price ratio
+    MAX_DEBIT_TO_PRICE_RATIO: '0.04'      # Maximum debit/price ratio
     
     # Earnings Stability Filter
     EARNINGS_STABILITY_THRESHOLD: '0.06'  # Maximum average move
-    STABILITY_THRESHOLD: '0.55'           # Minimum stability score
+    STABILITY_THRESHOLD: '0.70'           # Minimum stability score
     
     # Volatility Crush Filter
     VOLATILITY_CRUSH_THRESHOLD: '0.80'    # Minimum crush percentage
-    CRUSH_PERCENTAGE: '0.60'              # Minimum historical crush
+    CRUSH_PERCENTAGE: '0.70'              # Minimum historical crush
 ```
 
 ### **Filter Logic Flow**

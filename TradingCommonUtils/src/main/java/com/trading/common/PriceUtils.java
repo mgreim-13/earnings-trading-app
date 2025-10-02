@@ -64,7 +64,7 @@ public class PriceUtils {
      * 
      * @param bid Bid price
      * @param ask Ask price
-     * @param maxSpreadRatio Maximum acceptable spread ratio (e.g., 0.20 for 20%)
+     * @param maxSpreadRatio Maximum acceptable spread ratio (e.g., 0.10 for 10%)
      * @return true if spread is acceptable, false otherwise
      */
     public static boolean isSpreadAcceptable(double bid, double ask, double maxSpreadRatio) {

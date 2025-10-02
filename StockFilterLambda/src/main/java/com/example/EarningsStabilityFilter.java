@@ -27,10 +27,10 @@ public class EarningsStabilityFilter {
     public EarningsStabilityFilter(AlpacaCredentials credentials, StockFilterCommonUtils commonUtils) {
         this.commonUtils = commonUtils;
         
-        // Load thresholds from environment
-        this.STABILITY_THRESHOLD = Double.parseDouble(System.getenv().getOrDefault("STABILITY_THRESHOLD", "0.60"));
-        this.EARNINGS_STABILITY_THRESHOLD = Double.parseDouble(System.getenv().getOrDefault("EARNINGS_STABILITY_THRESHOLD", "0.05"));
-        this.STRADDLE_HISTORICAL_MULTIPLIER = Double.parseDouble(System.getenv().getOrDefault("STRADDLE_HISTORICAL_MULTIPLIER", "1.5"));
+        // Load thresholds from central configuration
+        this.STABILITY_THRESHOLD = FilterThresholds.STABILITY_THRESHOLD;
+        this.EARNINGS_STABILITY_THRESHOLD = FilterThresholds.EARNINGS_STABILITY_THRESHOLD;
+        this.STRADDLE_HISTORICAL_MULTIPLIER = FilterThresholds.STRADDLE_HISTORICAL_MULTIPLIER;
     }
     
     /**
@@ -45,14 +45,14 @@ public class EarningsStabilityFilter {
             List<StockFilterCommonUtils.EarningsData> earningsData = commonUtils.getHistoricalEarningsData(ticker, context);
             if (earningsData.isEmpty()) {
                 context.getLogger().log("No historical earnings data for " + ticker);
-                return new FilterResult("EarningsStability", false, 0);
+                return new FilterResult("EarningsStability", false);
             }
             
             // Calculate average historical move
             double averageHistoricalMove = calculateAverageHistoricalMove(ticker, earningsData, context);
             if (averageHistoricalMove < 0) {
                 context.getLogger().log("Could not calculate average historical move for " + ticker);
-                return new FilterResult("EarningsStability", false, 0);
+                return new FilterResult("EarningsStability", false);
             }
             
             // Check historical stability (original logic)
@@ -79,31 +79,28 @@ public class EarningsStabilityFilter {
             
             // Determine result based on available data
             boolean passed;
-            int score;
             String reason;
             
             if (usedStraddleData) {
                 // Both conditions must be met for full pass
                 passed = historicalStable && straddleOverpriced;
-                score = passed ? 2 : 0;
                 reason = passed ? "Both historical stability and straddle overpricing" : 
                     (!historicalStable ? "Historical stability failed" : "Straddle not overpriced");
             } else {
                 // Fallback to historical stability only
                 passed = historicalStable;
-                score = passed ? 1 : 0; // Partial score for fallback
                 reason = passed ? "Historical stability (straddle data unavailable)" : "Historical stability failed";
             }
             
             context.getLogger().log(ticker + " earnings stability result: " + reason + 
-                " (score=" + score + ", historical_stable=" + historicalStable + 
+                " (historical_stable=" + historicalStable + 
                 ", straddle_overpriced=" + straddleOverpriced + ", used_straddle=" + usedStraddleData + ")");
             
-            return new FilterResult("EarningsStability", passed, score);
+            return new FilterResult("EarningsStability", passed);
             
         } catch (Exception e) {
             context.getLogger().log("Error checking earnings stability for " + ticker + ": " + e.getMessage());
-            return new FilterResult("EarningsStability", false, 0);
+            return new FilterResult("EarningsStability", false);
         }
     }
     

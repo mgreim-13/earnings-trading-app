@@ -25,8 +25,8 @@ public class ExecutionSpreadFilter {
         this.credentials = credentials;
         this.commonUtils = commonUtils;
         
-        // Load thresholds from environment
-        this.MAX_DEBIT_TO_PRICE_RATIO = Double.parseDouble(System.getenv().getOrDefault("MAX_DEBIT_TO_PRICE_RATIO", "0.05"));
+        // Load thresholds from central configuration
+        this.MAX_DEBIT_TO_PRICE_RATIO = FilterThresholds.MAX_DEBIT_TO_PRICE_RATIO;
     }
     
     /**
@@ -37,29 +37,29 @@ public class ExecutionSpreadFilter {
         try {
             double currentPrice = commonUtils.getCurrentStockPrice(ticker, context);
             if (currentPrice <= 0) {
-                return new FilterResult("ExecutionSpread", false, 0);
+                return new FilterResult("ExecutionSpread", false);
             }
             
             SpreadQuotes spreadQuotes = getSpreadQuotes(ticker, earningsDate, currentPrice, context);
             if (spreadQuotes == null) {
-                return new FilterResult("ExecutionSpread", false, 0);
+                return new FilterResult("ExecutionSpread", false);
             }
             
             // Validate bid/ask spreads
             double shortMid = OptionSelectionUtils.validateBidAsk(spreadQuotes.shortBid, spreadQuotes.shortAsk);
             double longMid = OptionSelectionUtils.validateBidAsk(spreadQuotes.longBid, spreadQuotes.longAsk);
             if (shortMid < 0 || longMid < 0) {
-                return new FilterResult("ExecutionSpread", false, 0);
+                return new FilterResult("ExecutionSpread", false);
             }
             
             // Note: Strike matching is guaranteed by the new common strike logic in getSpreadQuotes()
             
             double netDebit = spreadQuotes.longAsk - spreadQuotes.shortBid;
             
-            // Dynamic debit threshold based on stock price
-            double dynamicThreshold = Math.min(MAX_DEBIT_TO_PRICE_RATIO, 0.1 / currentPrice);
+            // Use fixed 5% threshold for all stocks (calendar spreads typically cost 1-5% of stock price)
+            double threshold = MAX_DEBIT_TO_PRICE_RATIO;
             double debitToPriceRatio = netDebit / currentPrice;
-            boolean reasonableDebit = debitToPriceRatio <= dynamicThreshold;
+            boolean reasonableDebit = debitToPriceRatio <= threshold;
             
             // For calendar spreads, check net theta (long theta - short theta) > 0
             // This ensures the long option has less negative theta (slower time decay) than the short option
@@ -67,17 +67,16 @@ public class ExecutionSpreadFilter {
             boolean positiveNetTheta = netTheta > 0;
             boolean passes = reasonableDebit && positiveNetTheta;
             
-            int score = passes ? 3 : 0;
             String reason = String.format("debit=%.2f, price=%.2f, debit/price=%.3f (threshold=%.3f), strike=%.2f, net_theta=%.3f (long=%.3f, short=%.3f)", 
-                netDebit, currentPrice, debitToPriceRatio, dynamicThreshold, spreadQuotes.shortStrike, netTheta, spreadQuotes.longTheta, spreadQuotes.shortTheta);
+                netDebit, currentPrice, debitToPriceRatio, threshold, spreadQuotes.shortStrike, netTheta, spreadQuotes.longTheta, spreadQuotes.shortTheta);
             
             context.getLogger().log(ticker + " execution spread: " + reason + " (" + passes + ")");
             
-            return new FilterResult("ExecutionSpread", passes, score);
+            return new FilterResult("ExecutionSpread", passes);
             
         } catch (Exception e) {
             context.getLogger().log("Error checking execution spread for " + ticker + ": " + e.getMessage());
-            return new FilterResult("ExecutionSpread", false, 0);
+            return new FilterResult("ExecutionSpread", false);
         }
     }
     

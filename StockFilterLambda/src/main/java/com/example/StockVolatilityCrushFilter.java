@@ -27,10 +27,10 @@ public class StockVolatilityCrushFilter {
         this.credentials = credentials;
         this.commonUtils = commonUtils;
         
-        // Load thresholds from environment
-        this.VOLATILITY_CRUSH_THRESHOLD = Double.parseDouble(System.getenv().getOrDefault("VOLATILITY_CRUSH_THRESHOLD", "0.85"));
-        this.CRUSH_PERCENTAGE = Double.parseDouble(System.getenv().getOrDefault("CRUSH_PERCENTAGE", "0.60"));
-        this.VOLATILITY_LOOKBACK_DAYS = Integer.parseInt(System.getenv().getOrDefault("VOLATILITY_LOOKBACK_DAYS", "365"));
+        // Load thresholds from central configuration
+        this.VOLATILITY_CRUSH_THRESHOLD = FilterThresholds.VOLATILITY_CRUSH_THRESHOLD;
+        this.CRUSH_PERCENTAGE = FilterThresholds.CRUSH_PERCENTAGE;
+        this.VOLATILITY_LOOKBACK_DAYS = FilterThresholds.VOLATILITY_LOOKBACK_DAYS;
     }
     
     /**

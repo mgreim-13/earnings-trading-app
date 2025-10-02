@@ -24,8 +24,8 @@ public class TermStructureFilter {
         this.credentials = credentials;
         this.commonUtils = commonUtils;
         
-        // Load thresholds from environment
-        this.SLOPE_THRESHOLD = Double.parseDouble(System.getenv().getOrDefault("SLOPE_THRESHOLD", "0.01"));
+        // Load thresholds from central configuration
+        this.SLOPE_THRESHOLD = FilterThresholds.SLOPE_THRESHOLD;
     }
     
     /**

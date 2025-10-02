@@ -25,8 +25,8 @@ public class IVRatioFilter {
         this.credentials = credentials;
         this.commonUtils = commonUtils;
         
-        // Load thresholds from environment
-        this.IV_RATIO_THRESHOLD = Double.parseDouble(System.getenv().getOrDefault("IV_RATIO_THRESHOLD", "1.15"));
+        // Load thresholds from central configuration
+        this.IV_RATIO_THRESHOLD = FilterThresholds.IV_RATIO_THRESHOLD;
     }
     
     /**
