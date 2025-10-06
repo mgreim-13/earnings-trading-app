@@ -14,11 +14,10 @@ A Java-based AWS Lambda function for monitoring active trading orders with time-
 ## Architecture
 
 - **Runtime**: Java 21
-- **AWS Services**: Lambda, DynamoDB (lightweight tracking), Secrets Manager
+- **AWS Services**: Lambda, Secrets Manager
 - **External APIs**: Alpaca Paper Trading API (primary data source)
 - **Deployment**: AWS SAM (Serverless Application Model)
 - **Data Flow**: 
-  - DynamoDB stores only order IDs and monitoring periods
   - Real-time order status fetched directly from Alpaca API
   - Single source of truth for order data
 
@@ -49,22 +48,9 @@ MonitorTradesLambda/
 
 ### Environment Variables
 
-- `ORDERS_TABLE`: DynamoDB table name for storing orders
 - `ALPACA_SECRET_NAME`: AWS Secrets Manager secret name containing Alpaca API credentials
 - `ALPACA_API_URL`: Alpaca API base URL (https://paper-api.alpaca.markets)
 
-### DynamoDB Table Schema
-
-**Table**: `OrdersTable`
-- **Partition Key**: `ticker` (String)
-- **Sort Key**: `orderId` (String)
-- **Attributes**:
-  - `tradeType` (String): "entry" or "exit"
-  - `submissionTime` (String): ISO 8601 timestamp
-  - `limitPrice` (Number): Order limit price
-  - `status` (String): Order status
-  - `monitoringEndTime` (String): ISO 8601 timestamp when monitoring should end
-  - `legs` (List): Order legs with symbol, side, ratio_quantity
 
 ### Secrets Manager
 
@@ -197,11 +183,10 @@ mvn test -Dtest=MonitorTradesLambdaIntegrationTest
 
 ### Manual Testing
 
-1. **Create test orders in DynamoDB**:
+1. **Submit test orders to Alpaca**:
 ```bash
-aws dynamodb put-item \
-  --table-name OrdersTable \
-  --item file://test-data/sample-order.json
+# Orders are submitted directly to Alpaca API
+# No DynamoDB setup required
 ```
 
 2. **Invoke Lambda function**:
@@ -219,7 +204,7 @@ See `test-data/` directory for sample test data files.
 ## Monitoring and Logging
 
 - **CloudWatch Logs**: All function execution logs
-- **DynamoDB**: Order status updates
+- **Alpaca API**: Order status monitoring
 - **Metrics**: Custom metrics for monitoring success/failure rates
 
 ## Error Handling

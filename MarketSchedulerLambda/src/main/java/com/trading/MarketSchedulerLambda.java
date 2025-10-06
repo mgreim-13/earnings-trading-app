@@ -41,7 +41,7 @@ public class MarketSchedulerLambda implements RequestHandler<Map<String, Object>
     
     // DynamoDB table names
     private static final String EARNINGS_TABLE = System.getenv("EARNINGS_TABLE");
-    private static final String FILTERED_STOCKS_TABLE = System.getenv("FILTERED_TABLE");
+    private static final String FILTERED_TABLE = System.getenv("FILTERED_TABLE");
     
     @Override
     public String handleRequest(Map<String, Object> event, Context context) {
@@ -369,7 +369,7 @@ public class MarketSchedulerLambda implements RequestHandler<Map<String, Object>
             
             // Delete tables to avoid idle costs
             deleteTableIfExists(EARNINGS_TABLE, context);
-            deleteTableIfExists(FILTERED_STOCKS_TABLE, context);
+            deleteTableIfExists(FILTERED_TABLE, context);
             
             context.getLogger().log("DynamoDB tables cleaned up successfully after early closure");
             
@@ -387,7 +387,7 @@ public class MarketSchedulerLambda implements RequestHandler<Map<String, Object>
             
             // Delete tables to avoid idle costs
             deleteTableIfExists(EARNINGS_TABLE, context);
-            deleteTableIfExists(FILTERED_STOCKS_TABLE, context);
+            deleteTableIfExists(FILTERED_TABLE, context);
             
             context.getLogger().log("DynamoDB tables cleaned up successfully after normal day");
             
@@ -407,7 +407,7 @@ public class MarketSchedulerLambda implements RequestHandler<Map<String, Object>
             createTableIfNotExists(EARNINGS_TABLE, "scanDate", "ticker", context);
             
             // Create filtered stocks table
-            createTableIfNotExists(FILTERED_STOCKS_TABLE, "filterDate", "ticker", context);
+            createTableIfNotExists(FILTERED_TABLE, "scanDate", "ticker", context);
             
             context.getLogger().log("DynamoDB tables created/verified successfully");
             

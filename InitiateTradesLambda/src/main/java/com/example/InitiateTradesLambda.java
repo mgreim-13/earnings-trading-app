@@ -46,7 +46,7 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
     @Override
     public String handleRequest(Map<String, Object> input, Context context) {
         try {
-            String scanDate = (String) input.getOrDefault("scanDate", TradingCommonUtils.getCurrentDateString());
+            String scanDate = extractScanDate(input);
             AlpacaCredentials credentials = TradingCommonUtils.getAlpacaCredentials(ALPACA_SECRET_NAME);
 
             if (!AlpacaHttpClient.isMarketOpen(credentials)) {
@@ -142,6 +142,34 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
 
         } catch (Exception e) {
             return TradingErrorHandler.handleError(e, context, "handleRequest");
+        }
+    }
+
+    /**
+     * Extract scan date from input, handling both manual input and EventBridge input
+     * EventBridge provides schedule-time in ISO format, manual input provides YYYY-MM-DD format
+     */
+    private String extractScanDate(Map<String, Object> input) {
+        String scanDate = (String) input.getOrDefault("scanDate", null);
+        
+        if (scanDate == null) {
+            // No scanDate provided, use current date
+            return TradingCommonUtils.getCurrentDateString();
+        }
+        
+        try {
+            // Check if it's an ISO datetime format from EventBridge (e.g., "2025-01-15T20:35:00Z")
+            if (scanDate.contains("T")) {
+                // Parse ISO datetime and extract date part
+                java.time.ZonedDateTime zonedDateTime = java.time.ZonedDateTime.parse(scanDate);
+                return zonedDateTime.withZoneSameInstant(ZoneId.of("America/New_York")).toLocalDate().toString();
+            } else {
+                // Assume it's already in YYYY-MM-DD format
+                return scanDate;
+            }
+        } catch (Exception e) {
+            // If parsing fails, fall back to current date
+            return TradingCommonUtils.getCurrentDateString();
         }
     }
 
@@ -299,6 +327,8 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
 
     /**
      * Calculates the debit for a calendar spread
+     * For calendar spreads: Net Debit = Far Ask - Near Ask
+     * (You pay the ask for the long leg, receive the ask for the short leg)
      */
     public double calculateDebit(String nearSymbol, String farSymbol, AlpacaCredentials credentials) {
         return TradingCommonUtils.executeWithErrorHandling("calculating debit", () -> {
@@ -314,7 +344,7 @@ public class InitiateTradesLambda implements RequestHandler<Map<String, Object>,
             
             double nearBid = JsonParsingUtils.getBidPrice(nearQuote);
             double farAsk = JsonParsingUtils.getAskPrice(farQuote);
-            return Math.max(0.0, farAsk - nearBid);
+            return Math.max(0.0, nearBid - farAsk);
         });
     }
 

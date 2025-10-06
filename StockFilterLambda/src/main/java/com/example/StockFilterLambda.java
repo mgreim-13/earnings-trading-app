@@ -52,7 +52,7 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
     @Override
     public String handleRequest(Map<String, Object> input, Context context) {
         try {
-            final String scanDate = (String) input.getOrDefault("scanDate", LocalDate.now(ZoneId.of("America/New_York")).toString());
+            final String scanDate = extractScanDate(input);
             
             context.getLogger().log("Starting stock filter scan for date: " + scanDate);
             
@@ -84,6 +84,34 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
             context.getLogger().log("Error in stock filter lambda: " + e.getMessage());
             TradingErrorHandler.handleError(e, context, "StockFilterLambda");
             return "Error: " + e.getMessage();
+        }
+    }
+    
+    /**
+     * Extract scan date from input, handling both manual input and EventBridge input
+     * EventBridge provides schedule-time in ISO format, manual input provides YYYY-MM-DD format
+     */
+    private String extractScanDate(Map<String, Object> input) {
+        String scanDate = (String) input.getOrDefault("scanDate", null);
+        
+        if (scanDate == null) {
+            // No scanDate provided, use current date
+            return LocalDate.now(ZoneId.of("America/New_York")).toString();
+        }
+        
+        try {
+            // Check if it's an ISO datetime format from EventBridge (e.g., "2025-01-15T20:35:00Z")
+            if (scanDate.contains("T")) {
+                // Parse ISO datetime and extract date part
+                java.time.ZonedDateTime zonedDateTime = java.time.ZonedDateTime.parse(scanDate);
+                return zonedDateTime.withZoneSameInstant(ZoneId.of("America/New_York")).toLocalDate().toString();
+            } else {
+                // Assume it's already in YYYY-MM-DD format
+                return scanDate;
+            }
+        } catch (Exception e) {
+            // If parsing fails, fall back to current date
+            return LocalDate.now(ZoneId.of("America/New_York")).toString();
         }
     }
     
@@ -156,7 +184,7 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
             
         return dynamoDbClient.scan(scanRequest);
     }
-            
+    
     /**
      * Extract ticker symbols from DynamoDB scan response
      */
@@ -190,7 +218,7 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
             }
             
             // Evaluate using gatekeeper system
-            TradeDecision decision = evaluateTradeWithGatekeepers(ticker, earningsDate, context);
+            TradeDecision decision = evaluateTradeWithGatekeepers(ticker, earningsDate, scanDate, context);
             
             if (!decision.isApproved()) {
                 context.getLogger().log(ticker + " REJECTED: " + decision.getReason());
@@ -285,7 +313,7 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
     /**
      * Evaluate trade using gatekeeper system (4 gatekeepers + 2 optional)
      */
-    private TradeDecision evaluateTradeWithGatekeepers(String ticker, LocalDate earningsDate, Context context) {
+    private TradeDecision evaluateTradeWithGatekeepers(String ticker, LocalDate earningsDate, String scanDate, Context context) {
         Map<String, Boolean> filterResults = new HashMap<>();
         
         // Gatekeeper 1: Liquidity
@@ -296,21 +324,21 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
         }
         
         // Gatekeeper 2: IV Ratio
-        boolean ivRatioPassed = evaluateIVRatioGatekeeper(ticker, earningsDate, context);
+        boolean ivRatioPassed = evaluateIVRatioGatekeeper(ticker, earningsDate, scanDate, context);
         filterResults.put("ivRatioPassed", ivRatioPassed);
         if (!ivRatioPassed) {
             return new TradeDecision(ticker, false, "No IV skew", 0.0, filterResults);
         }
         
         // Gatekeeper 3: Term Structure
-        boolean termStructurePassed = evaluateTermStructureGatekeeper(ticker, earningsDate, context);
+        boolean termStructurePassed = evaluateTermStructureGatekeeper(ticker, earningsDate, scanDate, context);
         filterResults.put("termStructurePassed", termStructurePassed);
         if (!termStructurePassed) {
             return new TradeDecision(ticker, false, "No term structure backwardation", 0.0, filterResults);
         }
         
         // Gatekeeper 4: Execution Spread
-        boolean executionSpreadPassed = evaluateExecutionSpreadGatekeeper(ticker, earningsDate, context);
+        boolean executionSpreadPassed = evaluateExecutionSpreadGatekeeper(ticker, earningsDate, scanDate, context);
         filterResults.put("executionSpreadPassed", executionSpreadPassed);
         if (!executionSpreadPassed) {
             return new TradeDecision(ticker, false, "Poor execution spread", 0.0, filterResults);
@@ -367,7 +395,7 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
             }
             
             // Evaluate using gatekeeper system
-            return evaluateTradeWithGatekeepers(ticker, earningsDate, context);
+            return evaluateTradeWithGatekeepers(ticker, earningsDate, scanDate, context);
             
         } catch (Exception e) {
             context.getLogger().log("Error evaluating " + ticker + ": " + e.getMessage());
@@ -413,6 +441,9 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
         
         double totalPercentage = baseInvestment + additionalInvestment;
         
+        // Debug logging to see actual values
+        context.getLogger().log("DEBUG: " + ticker + " position sizing calculation - baseInvestment=" + baseInvestment + 
+            ", additionalInvestment=" + additionalInvestment + ", totalPercentage=" + totalPercentage);
         
         context.getLogger().log(ticker + " position sizing: base=5%, additional=" + 
             String.format("%.1f%%", additionalInvestment * 100) + ", total=" + 
@@ -440,33 +471,36 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
         }
     }
     
-    private boolean evaluateIVRatioGatekeeper(String ticker, LocalDate earningsDate, Context context) {
+    private boolean evaluateIVRatioGatekeeper(String ticker, LocalDate earningsDate, String scanDate, Context context) {
         try {
             // Use the proper IVRatioFilter class
             IVRatioFilter ivRatioFilter = new IVRatioFilter(credentials, commonUtils);
-            return ivRatioFilter.hasIVRatio(ticker, earningsDate, context);
+            LocalDate scanDateLocal = LocalDate.parse(scanDate);
+            return ivRatioFilter.hasIVRatio(ticker, earningsDate, scanDateLocal, context);
         } catch (Exception e) {
             context.getLogger().log("Error in IV ratio gatekeeper for " + ticker + ": " + e.getMessage());
             return false;
         }
     }
     
-    private boolean evaluateTermStructureGatekeeper(String ticker, LocalDate earningsDate, Context context) {
+    private boolean evaluateTermStructureGatekeeper(String ticker, LocalDate earningsDate, String scanDate, Context context) {
         try {
             // Use the proper TermStructureFilter class
             TermStructureFilter termStructureFilter = new TermStructureFilter(credentials, commonUtils);
-            return termStructureFilter.hasTermStructureBackwardation(ticker, earningsDate, context);
+            LocalDate scanDateLocal = LocalDate.parse(scanDate);
+            return termStructureFilter.hasTermStructureBackwardation(ticker, earningsDate, scanDateLocal, context);
         } catch (Exception e) {
             context.getLogger().log("Error in term structure gatekeeper for " + ticker + ": " + e.getMessage());
             return false;
         }
     }
     
-    private boolean evaluateExecutionSpreadGatekeeper(String ticker, LocalDate earningsDate, Context context) {
+    private boolean evaluateExecutionSpreadGatekeeper(String ticker, LocalDate earningsDate, String scanDate, Context context) {
         try {
             // Use the proper ExecutionSpreadFilter class
             ExecutionSpreadFilter executionSpreadFilter = new ExecutionSpreadFilter(credentials, commonUtils);
-            return executionSpreadFilter.hasExecutionSpreadFeasibility(ticker, earningsDate, context).isPassed();
+            LocalDate scanDateLocal = LocalDate.parse(scanDate);
+            return executionSpreadFilter.hasExecutionSpreadFeasibility(ticker, earningsDate, scanDateLocal, context).isPassed();
         } catch (Exception e) {
             context.getLogger().log("Error in execution spread gatekeeper for " + ticker + ": " + e.getMessage());
             return false;
@@ -499,18 +533,42 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
     private int writeResultsToFilteredTable(String scanDate, List<Map<String, Object>> recommendationResults, Context context) {
         int successfullyWrittenCount = 0;
         
+        context.getLogger().log("Writing " + recommendationResults.size() + " recommendations to filtered-tickers-table");
+        
         for (Map<String, Object> recommendation : recommendationResults) {
+            String ticker = (String) recommendation.get("ticker");
+            String status = (String) recommendation.get("status");
+            
+            context.getLogger().log("Processing recommendation for " + ticker + " with status: " + status);
+            
+            // Validate required fields
+            if (ticker == null || ticker.isEmpty()) {
+                context.getLogger().log("Skipping recommendation - missing ticker field");
+                continue;
+            }
+            
+            if (status == null || status.isEmpty()) {
+                context.getLogger().log("Skipping " + ticker + " - missing status field");
+                continue;
+            }
+            
             if (shouldWriteRecommendation(recommendation)) {
                 try {
-                    Map<String, AttributeValue> dynamoDbItem = buildDynamoDbItem(recommendation, scanDate);
+                    Map<String, AttributeValue> dynamoDbItem = buildDynamoDbItem(recommendation, scanDate, context);
+                    context.getLogger().log("Writing DynamoDB item for " + ticker + ": " + dynamoDbItem.toString());
                     writeItemToDynamoDb(dynamoDbItem);
                     successfullyWrittenCount++;
+                    context.getLogger().log("Successfully wrote " + ticker + " to filtered-tickers-table");
                 } catch (Exception e) {
-                    context.getLogger().log("Error writing result to filtered-tickers-table: " + e.getMessage());
+                    context.getLogger().log("Error writing " + ticker + " to filtered-tickers-table: " + e.getMessage());
+                    e.printStackTrace();
                 }
+            } else {
+                context.getLogger().log("Skipping " + ticker + " - status not 'Recommended'");
             }
         }
         
+        context.getLogger().log("Successfully wrote " + successfullyWrittenCount + " out of " + recommendationResults.size() + " recommendations");
         return successfullyWrittenCount;
     }
     
@@ -525,11 +583,11 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
     /**
      * Build DynamoDB item from recommendation data
      */
-    private Map<String, AttributeValue> buildDynamoDbItem(Map<String, Object> recommendation, String scanDate) {
+    private Map<String, AttributeValue> buildDynamoDbItem(Map<String, Object> recommendation, String scanDate, Context context) {
         Map<String, AttributeValue> dynamoDbItem = new HashMap<>();
         
         // Add basic fields
-        addBasicFieldsToDynamoDbItem(dynamoDbItem, recommendation, scanDate);
+        addBasicFieldsToDynamoDbItem(dynamoDbItem, recommendation, scanDate, context);
         
         return dynamoDbItem;
     }
@@ -537,16 +595,19 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
     /**
      * Add basic fields to DynamoDB item
      */
-    private void addBasicFieldsToDynamoDbItem(Map<String, AttributeValue> dynamoDbItem, Map<String, Object> recommendation, String scanDate) {
+    private void addBasicFieldsToDynamoDbItem(Map<String, AttributeValue> dynamoDbItem, Map<String, Object> recommendation, String scanDate, Context context) {
         String tickerSymbol = (String) recommendation.get("ticker");
         Double positionSizePercentage = (Double) recommendation.get("positionSizePercentage");
         
-        dynamoDbItem.put("ticker", AttributeValue.builder().s(tickerSymbol).build());
-        dynamoDbItem.put("scanDate", AttributeValue.builder().s(scanDate).build());
+        // Primary key fields (REQUIRED)
+        dynamoDbItem.put("scanDate", AttributeValue.builder().s(scanDate).build()); // HASH key
+        dynamoDbItem.put("ticker", AttributeValue.builder().s(tickerSymbol).build()); // RANGE key
         
         // Add position sizing data (only field used by downstream Lambdas)
         if (positionSizePercentage != null) {
-            dynamoDbItem.put("positionSizePercentage", AttributeValue.builder().n(String.valueOf(positionSizePercentage)).build());
+            String positionSizeString = String.valueOf(positionSizePercentage);
+            context.getLogger().log("DEBUG: Storing position size for " + tickerSymbol + " - raw value: " + positionSizePercentage + ", string value: " + positionSizeString);
+            dynamoDbItem.put("positionSizePercentage", AttributeValue.builder().n(positionSizeString).build());
         }
     }
     
@@ -554,12 +615,16 @@ public class StockFilterLambda implements RequestHandler<Map<String, Object>, St
      * Write item to DynamoDB
      */
     private void writeItemToDynamoDb(Map<String, AttributeValue> dynamoDbItem) {
-                PutItemRequest putItemRequest = PutItemRequest.builder()
-                    .tableName(FILTERED_TABLE)
-                    .item(dynamoDbItem)
-                    .build();
-                
-                dynamoDbClient.putItem(putItemRequest);
+        try {
+            PutItemRequest putItemRequest = PutItemRequest.builder()
+                .tableName(FILTERED_TABLE)
+                .item(dynamoDbItem)
+                .build();
+            
+            dynamoDbClient.putItem(putItemRequest);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to write item to DynamoDB table " + FILTERED_TABLE + ": " + e.getMessage(), e);
+        }
     }
     
     

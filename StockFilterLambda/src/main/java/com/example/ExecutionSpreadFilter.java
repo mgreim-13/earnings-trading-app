@@ -33,14 +33,14 @@ public class ExecutionSpreadFilter {
      * Check if execution spread is feasible
      * Returns FilterResult for integration with scoring system
      */
-    public FilterResult hasExecutionSpreadFeasibility(String ticker, LocalDate earningsDate, Context context) {
+    public FilterResult hasExecutionSpreadFeasibility(String ticker, LocalDate earningsDate, LocalDate scanDate, Context context) {
         try {
             double currentPrice = commonUtils.getCurrentStockPrice(ticker, context);
             if (currentPrice <= 0) {
                 return new FilterResult("ExecutionSpread", false);
             }
             
-            SpreadQuotes spreadQuotes = getSpreadQuotes(ticker, earningsDate, currentPrice, context);
+            SpreadQuotes spreadQuotes = getSpreadQuotes(ticker, earningsDate, scanDate, currentPrice, context);
             if (spreadQuotes == null) {
                 return new FilterResult("ExecutionSpread", false);
             }
@@ -82,15 +82,12 @@ public class ExecutionSpreadFilter {
     
     /**
      * Get quotes for calendar spread legs using consistent option selection
-     * Uses scan date as base date - all filters find the same options
-     * This accounts for both BMO and AMC earnings calls since scan runs the day before earnings
+     * Uses provided scan date as base date - all filters find the same options
      * Uses common strike logic to ensure both legs have the same strike price
      */
-    private SpreadQuotes getSpreadQuotes(String ticker, LocalDate earningsDate, double currentPrice, Context context) {
+    private SpreadQuotes getSpreadQuotes(String ticker, LocalDate earningsDate, LocalDate scanDate, double currentPrice, Context context) {
         try {
-            // Use scan date (current date) as base date - all filters find the same options
-            // This works for both BMO (expires on earnings day) and AMC (expires day after earnings)
-            LocalDate scanDate = LocalDate.now(ZoneId.of("America/New_York")); // Scan date = day before earnings
+            // Use provided scan date as base date - all filters find the same options
             
             // Get wide range of options (1-60 days) to find proper legs
             Map<String, OptionSnapshot> allOptions = commonUtils.getOptionChainForDateRange(

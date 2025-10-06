@@ -11,7 +11,7 @@ Globals:
       Variables:
         FINNHUB_API_URL: https://finnhub.io/api/v1/calendar/earnings
         FINNHUB_SECRET_NAME: trading/finnhub/credentials
-        DYNAMODB_TABLE: 'earnings-table'
+        EARNINGS_TABLE: 'earnings-table'
 
 Parameters:
   Environment:
@@ -36,7 +36,7 @@ Resources:
       Description: 'Lambda function for scanning earnings data from Finnhub API'
       Environment:
         Variables:
-          DYNAMODB_TABLE: 'earnings-table'
+          EARNINGS_TABLE: 'earnings-table'
       Policies:
         - DynamoDBCrudPolicy:
             TableName: 'earnings-table'

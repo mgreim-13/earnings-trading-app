@@ -57,11 +57,7 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
                 dayType = "normal"; // Default to normal day
             }
             
-            // Check if we're in a valid monitoring window
-            if (!isInMonitoringWindow(dayType)) {
-                context.getLogger().log("Not in monitoring window for " + dayType + " day, skipping execution");
-                return TradingErrorHandler.createSkippedResponse("outside_monitoring_window", Map.of("orders_monitored", 0));
-            }
+            // Time window restrictions removed - EventBridge controls when this runs
             
             // Get Alpaca API credentials
             AlpacaCredentials credentials = TradingCommonUtils.getAlpacaCredentials(ALPACA_SECRET);
@@ -245,12 +241,14 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
             
             double spreadPrice;
             if ("entry".equals(tradeType)) {
-                // Entry: debit = far_ask - near_bid
-                double farAsk = JsonParsingUtils.getAskPrice(farQuote);
+                // Entry: debit = near_bid - far_ask
+                // (You receive the bid for the short leg, pay the ask for the long leg)
                 double nearBid = JsonParsingUtils.getBidPrice(nearQuote);
-                spreadPrice = farAsk - nearBid;
+                double farAsk = JsonParsingUtils.getAskPrice(farQuote);
+                spreadPrice = nearBid - farAsk;
             } else {
                 // Exit: credit = far_bid - near_ask
+                // (You receive the bid for the far leg you're selling, pay the ask for the near leg you're buying back)
                 double farBid = JsonParsingUtils.getBidPrice(farQuote);
                 double nearAsk = JsonParsingUtils.getAskPrice(nearQuote);
                 spreadPrice = farBid - nearAsk;
@@ -484,40 +482,6 @@ public class MonitorTradesLambda implements RequestHandler<Map<String, Object>, 
     }
     
     
-    /**
-     * Checks if we're in a valid monitoring window
-     * Normal days: 9:46 AM - 10:00 AM EST and 3:46 PM - 4:00 PM EST
-     * Early closure days: 9:46 AM - 10:00 AM EST and 12:46 PM - 1:00 PM EST
-     */
-    public boolean isInMonitoringWindow(String dayType) {
-        try {
-            ZonedDateTime now = ZonedDateTime.now(EST_ZONE);
-            int hour = now.getHour();
-            int minute = now.getMinute();
-            
-            // Morning window: 9:46 AM - 10:00 AM EST (same for both day types)
-            boolean inMorningWindow = (hour == 9 && minute >= 46 && minute <= 59) || 
-                                    (hour == 10 && minute == 0);
-            
-            // Afternoon window depends on day type
-            boolean inAfternoonWindow;
-            if ("early".equals(dayType)) {
-                // Early closure: 12:46 PM - 1:00 PM EST
-                inAfternoonWindow = (hour == 12 && minute >= 46 && minute <= 59) || 
-                                  (hour == 13 && minute == 0);
-            } else {
-                // Normal day: 3:46 PM - 4:00 PM EST
-                inAfternoonWindow = (hour == 15 && minute >= 46 && minute <= 59) || 
-                                  (hour == 16 && minute == 0);
-            }
-            
-            boolean inWindow = inMorningWindow || inAfternoonWindow;
-            
-            return inWindow;
-        } catch (Exception e) {
-            return false; // Conservative approach - don't monitor if we can't determine time
-        }
-    }
     
     
     /**

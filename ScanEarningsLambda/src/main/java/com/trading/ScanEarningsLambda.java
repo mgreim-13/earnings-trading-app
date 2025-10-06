@@ -34,7 +34,7 @@ public class ScanEarningsLambda implements RequestHandler<Map<String, Object>, S
     
     private String getFinnhubUrl() { return getEnvVar("FINNHUB_API_URL", "FINNHUB_API_URL"); }
     private String getFinnhubSecret() { return getEnvVar("FINNHUB_SECRET_NAME", "trading/finnhub/credentials"); }
-    private String getDynamoDbTable() { return getEnvVar("DYNAMODB_TABLE", "DYNAMODB_TABLE"); }
+    private String getDynamoDbTable() { return getEnvVar("EARNINGS_TABLE", "EARNINGS_TABLE"); }
     
     // Constants
     private static final String TIMEZONE = "America/New_York";

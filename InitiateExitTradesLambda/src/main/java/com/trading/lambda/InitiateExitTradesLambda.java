@@ -53,9 +53,7 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
         return executorService;
     }
     
-    // Exit criteria - ALL positions should be closed at 9:45 AM EST
-    private static final int EXIT_HOUR = 9; // 9 AM EST
-    private static final int EXIT_MINUTE = 45; // 45 minutes
+    // Time window restrictions removed - EventBridge controls when this runs
 
     @Override
     public APIGatewayProxyResponseEvent handleRequest(APIGatewayProxyRequestEvent input, Context context) {
@@ -70,11 +68,7 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
                 return createSuccessResponse("Market is closed. No positions processed.");
             }
             
-            // Check if it's time to exit (9:45 AM EST)
-            if (!isTimeToExit()) {
-                log.info("Not yet time to exit positions. Current time is not 9:45 AM EST.");
-                return createSuccessResponse("Not yet time to exit positions.");
-            }
+            // Time window restrictions removed - EventBridge controls when this runs
             
             // Use existing position fetching logic
             List<Position> allPositions = fetchHeldPositions();
@@ -312,7 +306,7 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
     
     /**
      * Calculate the credit for exiting a calendar spread
-     * Calendar spread exit: nearBid - farAsk (opposite of entry: farAsk - nearBid)
+     * Calendar spread exit: farBid - nearAsk (opposite of entry: nearBid - farAsk)
      */
     private double calculateExitCredit(List<Position> positions) {
         return executeWithErrorHandling("calculating calendar spread exit credit", () -> {
@@ -356,14 +350,14 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
             }
             
             // Use same price extraction methods as InitiateTradesLambda
-            double nearBid = JsonParsingUtils.getBidPrice(nearQuote);
-            double farAsk = JsonParsingUtils.getAskPrice(farQuote);
+            double farBid = JsonParsingUtils.getBidPrice(farQuote);
+            double nearAsk = JsonParsingUtils.getAskPrice(nearQuote);
             
-            // Calculate credit: nearBid - farAsk (opposite of entry debit: farAsk - nearBid)
-            double credit = Math.max(0.0, nearBid - farAsk);
+            // Calculate credit: farBid - nearAsk (opposite of entry debit: nearBid - farAsk)
+            double credit = Math.max(0.0, farBid - nearAsk);
             
-            log.info("Calendar spread exit credit calculation: nearBid={}, farAsk={}, credit={}", 
-                    nearBid, farAsk, credit);
+            log.info("Calendar spread exit credit calculation: farBid={}, nearAsk={}, credit={}", 
+                    farBid, nearAsk, credit);
             
             return credit;
         });
@@ -490,28 +484,6 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
     
     // Note: getCurrentMarketData method removed - now using InitiateTradesLambda approach with direct API calls
     
-    /**
-     * Check if it's time to exit positions (9:45 AM EST)
-     */
-    private boolean isTimeToExit() {
-        try {
-            LocalDateTime now = LocalDateTime.now(ZoneId.of("America/New_York"));
-            int currentHour = now.getHour();
-            int currentMinute = now.getMinute();
-            
-            // Check if it's 9:45 AM EST (within a 5-minute window for safety)
-            boolean isExitTime = (currentHour == EXIT_HOUR && currentMinute >= EXIT_MINUTE && currentMinute <= EXIT_MINUTE + 5);
-            
-            log.info("Current time: {}:{} EST, Exit time: {}:{} EST, Is exit time: {}", 
-                    currentHour, String.format("%02d", currentMinute), 
-                    EXIT_HOUR, String.format("%02d", EXIT_MINUTE), isExitTime);
-            
-            return isExitTime;
-        } catch (Exception e) {
-            log.error("Error checking exit time: {}", e.getMessage(), e);
-            return false; // Conservative approach
-        }
-    }
     
     /**
      * Check if market is currently open

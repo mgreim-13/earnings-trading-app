@@ -33,14 +33,12 @@ public class IVRatioFilter {
      * Check if stock has sufficient IV ratio for debit calendar spread around earnings
      * Compares short-term IV (earliest expiration after scan date) vs long-term IV (closest to 30 days from scan date)
      * Higher short-term IV indicates potential volatility crush opportunity
-     * Uses scan date as base date - all filters find the same options
+     * Uses provided scan date as base date - all filters find the same options
      */
-    public boolean hasIVRatio(String ticker, LocalDate earningsDate, Context context) {
+    public boolean hasIVRatio(String ticker, LocalDate earningsDate, LocalDate scanDate, Context context) {
         try {
             double currentPrice = commonUtils.getCurrentStockPrice(ticker, context);
             if (currentPrice <= 0) return false;
-            
-            LocalDate scanDate = LocalDate.now(ZoneId.of("America/New_York")); // Scan date = day before earnings
             
             // Get wide range of options (1-60 days) to find proper legs
             Map<String, OptionSnapshot> allOptions = getOptionChainForLeg(ticker, scanDate, 1, 60, context);
@@ -132,15 +130,15 @@ public class IVRatioFilter {
     /**
      * Get option chain for a specific leg with flexible date range
      * @param ticker Stock ticker
-     * @param earningsDate Earnings date
-     * @param minDays Minimum days from earnings
-     * @param maxDays Maximum days from earnings
+     * @param scanDate Scan date (base date for option selection)
+     * @param minDays Minimum days from scan date
+     * @param maxDays Maximum days from scan date
      * @param context Lambda context
      * @return Map of option snapshots by expiration
      */
-    private Map<String, OptionSnapshot> getOptionChainForLeg(String ticker, LocalDate earningsDate, 
+    private Map<String, OptionSnapshot> getOptionChainForLeg(String ticker, LocalDate scanDate, 
                                                            int minDays, int maxDays, Context context) {
-        return commonUtils.getOptionChainForDateRange(ticker, earningsDate, minDays, maxDays, "call", credentials, context);
+        return commonUtils.getOptionChainForDateRange(ticker, scanDate, minDays, maxDays, "call", credentials, context);
     }
     
     /**

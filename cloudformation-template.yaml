@@ -91,6 +91,7 @@ Resources:
                   - dynamodb:DeleteItem
                   - dynamodb:BatchWriteItem
                   - dynamodb:DeleteTable
+                  - dynamodb:TagResource
                 Resource:
                   - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/earnings-table'
                   - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/filtered-tickers-table'
@@ -178,7 +179,7 @@ Resources:
       MemorySize: 512
       Environment:
         Variables:
-          DYNAMODB_TABLE: 'earnings-table'
+          EARNINGS_TABLE: 'earnings-table'
           FINNHUB_SECRET_NAME: !Ref FinnhubSecretName
           ALPACA_SECRET_NAME: !Ref AlpacaSecretName
           FINNHUB_API_URL: 'https://finnhub.io/api/v1/calendar/earnings'
@@ -237,6 +238,7 @@ Resources:
       Environment:
         Variables:
           ALPACA_SECRET_NAME: !Ref AlpacaSecretName
+          ALPACA_API_URL: 'https://paper-api.alpaca.markets/v2'
           ENVIRONMENT: !Ref Environment
 
   InitiateExitTradesLambda:
@@ -269,27 +271,27 @@ Resources:
           Id: 'MarketSchedulerTarget'
           Input: '{"source": "daily-schedule"}'
 
-  # Table Creation Rules - 5 minutes before ScanEarningsLambda
-  # Normal Day Table Creation (3:25 PM EST)
+  # Table Creation Rules - 10 minutes before ScanEarningsLambda
+  # Normal Day Table Creation (3:20 PM EST)
   TableCreationNormalRule:
     Type: AWS::Events::Rule
     Properties:
       Name: !Sub '${Environment}-table-creation-normal-rule'
-      Description: 'Creates DynamoDB tables 5 minutes before normal day ScanEarningsLambda runs'
-      ScheduleExpression: 'cron(25 15 ? * MON-FRI *)'  # 3:25 PM EST
+      Description: 'Creates DynamoDB tables 10 minutes before normal day ScanEarningsLambda runs'
+      ScheduleExpression: 'cron(20 15 ? * MON-FRI *)'  # 3:20 PM EST
       State: ENABLED
       Targets:
         - Arn: !GetAtt MarketSchedulerLambda.Arn
           Id: 'TableCreationNormalTarget'
           Input: '{"source": "create-tables", "dayType": "normal"}'
 
-  # Early Closure Day Table Creation (12:25 PM EST)
+  # Early Closure Day Table Creation (12:20 PM EST)
   TableCreationEarlyRule:
     Type: AWS::Events::Rule
     Properties:
       Name: !Sub '${Environment}-table-creation-early-rule'
-      Description: 'Creates DynamoDB tables 5 minutes before early closure ScanEarningsLambda runs'
-      ScheduleExpression: 'cron(25 12 ? * MON-FRI *)'  # 12:25 PM EST
+      Description: 'Creates DynamoDB tables 10 minutes before early closure ScanEarningsLambda runs'
+      ScheduleExpression: 'cron(20 12 ? * MON-FRI *)'  # 12:20 PM EST
       State: ENABLED
       Targets:
         - Arn: !GetAtt MarketSchedulerLambda.Arn
@@ -319,7 +321,8 @@ Resources:
       Targets:
         - Arn: !GetAtt StockFilterLambda.Arn
           Id: 'NormalStockFilterTarget'
-          Input: '{"source": "stock-filter-schedule"}'
+          InputTransformer:
+            InputTemplate: '{"source": "stock-filter-schedule", "scanDate": "<aws.events.rule.schedule-time>"}'
 
   NormalInitiateTradesRule:
     Type: AWS::Events::Rule
@@ -331,7 +334,8 @@ Resources:
       Targets:
         - Arn: !GetAtt InitiateTradesLambda.Arn
           Id: 'NormalInitiateTradesTarget'
-          Input: '{"source": "initiate-trades-schedule"}'
+          InputTransformer:
+            InputTemplate: '{"source": "initiate-trades-schedule", "scanDate": "<aws.events.rule.schedule-time>"}'
 
   NormalInitiateExitTradesRule:
     Type: AWS::Events::Rule
@@ -420,7 +424,8 @@ Resources:
       Targets:
         - Arn: !GetAtt StockFilterLambda.Arn
           Id: 'EarlyStockFilterTarget'
-          Input: '{"source": "stock-filter-schedule"}'
+          InputTransformer:
+            InputTemplate: '{"source": "stock-filter-schedule", "scanDate": "<aws.events.rule.schedule-time>"}'
 
   EarlyInitiateTradesRule:
     Type: AWS::Events::Rule
@@ -432,7 +437,8 @@ Resources:
       Targets:
         - Arn: !GetAtt InitiateTradesLambda.Arn
           Id: 'EarlyInitiateTradesTarget'
-          Input: '{"source": "initiate-trades-schedule"}'
+          InputTransformer:
+            InputTemplate: '{"source": "initiate-trades-schedule", "scanDate": "<aws.events.rule.schedule-time>"}'
 
   EarlyInitiateExitTradesRule:
     Type: AWS::Events::Rule

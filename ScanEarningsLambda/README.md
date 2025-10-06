@@ -72,7 +72,7 @@ The Lambda function uses the following environment variables (set in `template.y
 
 - `FINNHUB_API_URL`: https://finnhub.io/api/v1/calendar/earnings
 - `FINNHUB_SECRET_NAME`: finnhub-api-key
-- `DYNAMODB_TABLE`: DynamoDB table name (auto-generated)
+- `EARNINGS_TABLE`: DynamoDB table name (auto-generated)
 
 ## Local Testing
 
@@ -121,7 +121,7 @@ Create `events/env-vars.json`:
     "ALPACA_API_URL": "https://paper-api.alpaca.markets",
     "FINNHUB_SECRET_NAME": "finnhub-api-key",
     "ALPACA_SECRET_NAME": "alpaca-api-keys",
-    "DYNAMODB_TABLE": "earnings-table"
+    "EARNINGS_TABLE": "earnings-table"
   }
 }
 ```

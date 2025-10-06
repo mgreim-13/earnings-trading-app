@@ -32,13 +32,13 @@ public class TermStructureFilter {
      * Check if stock has term structure backwardation using options data only
      * Uses reusable option selection logic to find closest strikes and expirations
      */
-    public boolean hasTermStructureBackwardation(String ticker, LocalDate earningsDate, Context context) {
+    public boolean hasTermStructureBackwardation(String ticker, LocalDate earningsDate, LocalDate scanDate, Context context) {
         try {
             double currentPrice = commonUtils.getCurrentStockPrice(ticker, context);
             if (currentPrice <= 0) return false;
             
             // Get options data for term structure analysis
-            TermStructureData termData = getTermStructureData(ticker, earningsDate, currentPrice, context);
+            TermStructureData termData = getTermStructureData(ticker, earningsDate, scanDate, currentPrice, context);
             if (termData == null) {
                 context.getLogger().log("No options data available for term structure analysis for " + ticker);
                 return false;
@@ -60,15 +60,13 @@ public class TermStructureFilter {
     
     /**
      * Get comprehensive term structure data using reusable option selection logic
-     * Uses scan date as base date - all filters find the same options
+     * Uses provided scan date as base date - all filters find the same options
      * - Short leg: Earliest expiration after scan date (consistent across all filters)
      * - Medium leg: Closest to 30 days from scan date (monthly options)
      * - Long leg: Closest to 60 days from scan date (quarterly options)
-     * Since scan runs day before earnings, next trading day after earnings = next trading day after scan
      */
-    private TermStructureData getTermStructureData(String ticker, LocalDate earningsDate, double currentPrice, Context context) {
+    private TermStructureData getTermStructureData(String ticker, LocalDate earningsDate, LocalDate scanDate, double currentPrice, Context context) {
         try {
-            LocalDate scanDate = LocalDate.now(ZoneId.of("America/New_York")); // Scan date = day before earnings
             
             // Get wide range of options (1-60 days) to find proper legs
             Map<String, OptionSnapshot> allOptions = getOptionChainForLeg(ticker, scanDate, 1, 60, context);

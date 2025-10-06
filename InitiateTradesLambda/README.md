@@ -8,7 +8,7 @@ A Java-based AWS Lambda function for initiating calendar spread trades in a trad
 - **Risk Management**: Calculates position sizes based on 2% of account value
 - **Market Hours Check**: Only executes trades when market is open
 - **Paper Trading**: Uses Alpaca's paper trading environment for safe testing
-- **DynamoDB Integration**: Reads from filtered-tickers-table and writes to OrdersTable
+- **DynamoDB Integration**: Reads from filtered-tickers-table
 - **Error Handling**: Robust error handling with detailed logging
 
 ## Architecture
@@ -21,8 +21,6 @@ InitiateTradesLambda
 DynamoDB filtered-tickers-table (Read)
     ↓
 Alpaca APIs (Options, Quotes, Account, Orders)
-    ↓
-DynamoDB OrdersTable (Write)
 ```
 
 ## Prerequisites
@@ -52,7 +50,6 @@ Create a `.env` file or set environment variables:
 
 ```bash
 export FILTERED_TABLE="filtered-tickers-table"
-export ORDERS_TABLE="OrdersTable"
 export ALPACA_SECRET_NAME="trading/alpaca/credentials"
 export ALPACA_API_URL="https://paper-api.alpaca.markets/v2"
 ```
@@ -88,16 +85,6 @@ aws dynamodb create-table \
         AttributeName=ticker,KeyType=RANGE \
     --billing-mode PAY_PER_REQUEST
 
-# Create OrdersTable
-aws dynamodb create-table \
-    --table-name OrdersTable \
-    --attribute-definitions \
-        AttributeName=ticker,AttributeType=S \
-        AttributeName=orderId,AttributeType=S \
-    --key-schema \
-        AttributeName=ticker,KeyType=HASH \
-        AttributeName=orderId,KeyType=RANGE \
-    --billing-mode PAY_PER_REQUEST
 ```
 
 ## Local Testing
@@ -173,7 +160,6 @@ Create `env.json` for local testing:
 {
     "InitiateTradesLambda": {
         "FILTERED_TABLE": "filtered-tickers-table",
-        "ORDERS_TABLE": "OrdersTable",
         "ALPACA_SECRET_NAME": "alpaca-api-keys",
         "ALPACA_API_URL": "https://paper-api.alpaca.markets/v2"
     }
@@ -219,7 +205,6 @@ aws lambda create-function \
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `FILTERED_TABLE` | DynamoDB table for filtered tickers | `filtered-tickers-table` |
-| `ORDERS_TABLE` | DynamoDB table for order details | `OrdersTable` |
 | `ALPACA_SECRET_NAME` | Secrets Manager secret name | `trading/alpaca/credentials` |
 | `ALPACA_API_URL` | Alpaca API base URL | `https://paper-api.alpaca.markets/v2` |
 
@@ -238,14 +223,6 @@ The Lambda function requires the following permissions:
                 "dynamodb:Scan"
             ],
             "Resource": "arn:aws:dynamodb:*:*:table/filtered-tickers-table"
-        },
-        {
-            "Effect": "Allow",
-            "Action": [
-                "dynamodb:PutItem",
-                "dynamodb:UpdateItem"
-            ],
-            "Resource": "arn:aws:dynamodb:*:*:table/OrdersTable"
         },
         {
             "Effect": "Allow",
@@ -347,7 +324,6 @@ src/
 - `selectOptionContracts()`: Finds suitable options
 - `calculateDebit()`: Calculates spread cost
 - `submitOrder()`: Submits to Alpaca
-- `writeToOrdersTable()`: Writes to DynamoDB
 
 ### Adding New Features
 
