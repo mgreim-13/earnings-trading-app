@@ -148,7 +148,6 @@ Resources:
           SCAN_EARNINGS_LAMBDA: !Ref ScanEarningsLambda
           STOCK_FILTER_LAMBDA: !Ref StockFilterLambda
           INITIATE_TRADES_LAMBDA: !Ref InitiateTradesLambda
-          MONITOR_TRADES_LAMBDA: !Ref MonitorTradesLambda
           INITIATE_EXIT_TRADES_LAMBDA: !Ref InitiateExitTradesLambda
           FINNHUB_SECRET_NAME: !Ref FinnhubSecretName
           ENVIRONMENT: !Ref Environment
@@ -190,7 +189,7 @@ Resources:
     Properties:
       FunctionName: !Sub '${Environment}-stock-filter'
       Runtime: java21
-      Handler: com.example.StockFilterLambda::handleRequest
+      Handler: com.trading.lambda.StockFilterLambda::handleRequest
       Code:
         S3Bucket: !Ref S3BucketName
         S3Key: stock-filter-lambda-1.0.0.jar
@@ -210,7 +209,7 @@ Resources:
     Properties:
       FunctionName: !Sub '${Environment}-initiate-trades'
       Runtime: java21
-      Handler: com.example.InitiateTradesLambda::handleRequest
+      Handler: com.trading.lambda.InitiateTradesLambda::handleRequest
       Code:
         S3Bucket: !Ref S3BucketName
         S3Key: initiate-trades-lambda-1.0.0.jar
@@ -222,24 +221,6 @@ Resources:
           ALPACA_SECRET_NAME: !Ref AlpacaSecretName
           PAPER_TRADING: 'true'
           FILTERED_TABLE: 'filtered-tickers-table'
-
-  MonitorTradesLambda:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: !Sub '${Environment}-monitor-trades'
-      Runtime: java21
-      Handler: com.example.MonitorTradesLambda::handleRequest
-      Code:
-        S3Bucket: !Ref S3BucketName
-        S3Key: monitor-trades-lambda-1.0.0.jar
-      Role: !GetAtt TradingLambdaRole.Arn
-      Timeout: 300
-      MemorySize: 512
-      Environment:
-        Variables:
-          ALPACA_SECRET_NAME: !Ref AlpacaSecretName
-          ALPACA_API_URL: 'https://paper-api.alpaca.markets/v2'
-          ENVIRONMENT: !Ref Environment
 
   InitiateExitTradesLambda:
     Type: AWS::Lambda::Function
@@ -322,7 +303,7 @@ Resources:
         - Arn: !GetAtt StockFilterLambda.Arn
           Id: 'NormalStockFilterTarget'
           InputTransformer:
-            InputTemplate: '{"source": "stock-filter-schedule", "scanDate": "<aws.events.rule.schedule-time>"}'
+            InputTemplate: '{"source": "stock-filter-schedule"}'
 
   NormalInitiateTradesRule:
     Type: AWS::Events::Rule
@@ -335,7 +316,7 @@ Resources:
         - Arn: !GetAtt InitiateTradesLambda.Arn
           Id: 'NormalInitiateTradesTarget'
           InputTransformer:
-            InputTemplate: '{"source": "initiate-trades-schedule", "scanDate": "<aws.events.rule.schedule-time>"}'
+            InputTemplate: '{"source": "initiate-trades-schedule"}'
 
   NormalInitiateExitTradesRule:
     Type: AWS::Events::Rule
@@ -349,56 +330,190 @@ Resources:
           Id: 'NormalInitiateExitTradesTarget'
           Input: '{"source": "initiate-exit-trades-schedule"}'
 
-  # MonitorTradesLambda runs every minute during specified windows
-  # Normal Day Morning Window (9:46-10:00 AM EST) - Every minute
-  NormalMonitorTradesRule1:
+  # New Single-Purpose Lambda Functions
+  UpdateExitOrdersAtMarketLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-update-exit-orders-at-market'
+      Runtime: java21
+      Handler: com.trading.lambda.UpdateExitOrdersAtMarketLambda::handleRequest
+      Code:
+        S3Bucket: !Ref S3BucketName
+        S3Key: update-exit-orders-at-market-lambda-1.0.0.jar
+      Role: !GetAtt TradingLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          ALPACA_SECRET_NAME: !Ref AlpacaSecretName
+          ALPACA_API_URL: 'https://paper-api.alpaca.markets/v2'
+          ENVIRONMENT: !Ref Environment
+
+  ConvertExitOrdersToMarketLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-convert-exit-orders-to-market'
+      Runtime: java21
+      Handler: com.trading.lambda.ConvertExitOrdersToMarketLambda::handleRequest
+      Code:
+        S3Bucket: !Ref S3BucketName
+        S3Key: convert-exit-orders-to-market-lambda-1.0.0.jar
+      Role: !GetAtt TradingLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          ALPACA_SECRET_NAME: !Ref AlpacaSecretName
+          ALPACA_API_URL: 'https://paper-api.alpaca.markets/v2'
+          ENVIRONMENT: !Ref Environment
+
+  UpdateEntryOrdersAtMarketLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-update-entry-orders-at-market'
+      Runtime: java21
+      Handler: com.trading.lambda.UpdateEntryOrdersAtMarketLambda::handleRequest
+      Code:
+        S3Bucket: !Ref S3BucketName
+        S3Key: update-entry-orders-at-market-lambda-1.0.0.jar
+      Role: !GetAtt TradingLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          ALPACA_SECRET_NAME: !Ref AlpacaSecretName
+          ALPACA_API_URL: 'https://paper-api.alpaca.markets/v2'
+          ENVIRONMENT: !Ref Environment
+
+  CancelEntryOrdersLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-cancel-entry-orders'
+      Runtime: java21
+      Handler: com.trading.lambda.CancelEntryOrdersLambda::handleRequest
+      Code:
+        S3Bucket: !Ref S3BucketName
+        S3Key: cancel-entry-orders-lambda-1.0.0.jar
+      Role: !GetAtt TradingLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          ALPACA_SECRET_NAME: !Ref AlpacaSecretName
+          ALPACA_API_URL: 'https://paper-api.alpaca.markets/v2'
+          ENVIRONMENT: !Ref Environment
+
+  UpdateExitOrdersAtDiscountLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-update-exit-orders-at-discount'
+      Runtime: java21
+      Handler: com.trading.lambda.UpdateExitOrdersAtDiscountLambda::handleRequest
+      Code:
+        S3Bucket: !Ref S3BucketName
+        S3Key: update-exit-orders-at-discount-lambda-1.0.0.jar
+      Role: !GetAtt TradingLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          ALPACA_SECRET_NAME: !Ref AlpacaSecretName
+          ALPACA_API_URL: 'https://paper-api.alpaca.markets/v2'
+          ENVIRONMENT: !Ref Environment
+
+
+
+
+
+
+  # Morning Window: UpdateExitOrdersLambda (first 10 times: 9:46-9:55 AM EST)
+  NormalUpdateExitOrdersRule1:
     Type: AWS::Events::Rule
     Properties:
-      Name: !Sub '${Environment}-normal-monitor-trades-rule-1'
-      Description: 'Triggers MonitorTradesLambda every minute during 9:46-10:00 AM EST on normal trading days'
-      ScheduleExpression: 'cron(46-59 9 ? * MON-FRI *)'  # 9:46-9:59 AM EST every minute
+      Name: !Sub '${Environment}-normal-update-exit-orders-rule-1'
+      Description: 'Triggers UpdateExitOrdersAtMarketLambda every minute during 9:46-9:55 AM EST on normal trading days'
+      ScheduleExpression: 'cron(46-55 9 ? * MON-FRI *)'  # 9:46-9:55 AM EST every minute
       State: ENABLED
       Targets:
-        - Arn: !GetAtt MonitorTradesLambda.Arn
-          Id: 'NormalMonitorTradesTarget1'
-          Input: '{"source": "monitor-trades-schedule", "window": "morning", "dayType": "normal"}'
+        - Arn: !GetAtt UpdateExitOrdersAtMarketLambda.Arn
+          Id: 'NormalUpdateExitOrdersTarget1'
+          Input: '{"source": "update-exit-orders-schedule", "window": "morning", "dayType": "normal"}'
 
-  NormalMonitorTradesRule1b:
+  # Morning Window: UpdateExitOrdersSimpleLambda (11th and 12th times: 9:56-9:57 AM EST)
+  NormalUpdateExitOrdersSimpleRule1:
     Type: AWS::Events::Rule
     Properties:
-      Name: !Sub '${Environment}-normal-monitor-trades-rule-1b'
-      Description: 'Triggers MonitorTradesLambda at 10:00 AM EST on normal trading days'
+      Name: !Sub '${Environment}-normal-update-exit-orders-simple-rule-1'
+      Description: 'Triggers UpdateExitOrdersAtDiscountLambda at 9:56-9:57 AM EST on normal trading days'
+      ScheduleExpression: 'cron(56-57 9 ? * MON-FRI *)'  # 9:56-9:57 AM EST
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt UpdateExitOrdersAtDiscountLambda.Arn
+          Id: 'NormalUpdateExitOrdersSimpleTarget1'
+          Input: '{"source": "update-exit-orders-simple-schedule", "window": "morning", "dayType": "normal"}'
+
+  # Morning Window: ConvertExitOrdersLambda (last 3 times: 9:58-9:59 AM EST + 10:00 AM)
+  NormalConvertExitOrdersRule1:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-normal-convert-exit-orders-rule-1'
+      Description: 'Triggers ConvertExitOrdersToMarketLambda every minute during 9:58-9:59 AM EST on normal trading days'
+      ScheduleExpression: 'cron(58-59 9 ? * MON-FRI *)'  # 9:58-9:59 AM EST every minute
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ConvertExitOrdersToMarketLambda.Arn
+          Id: 'NormalConvertExitOrdersTarget1'
+          Input: '{"source": "convert-exit-orders-schedule", "window": "morning", "dayType": "normal"}'
+
+  NormalConvertExitOrdersRule1b:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-normal-convert-exit-orders-rule-1b'
+      Description: 'Triggers ConvertExitOrdersToMarketLambda at 10:00 AM EST on normal trading days'
       ScheduleExpression: 'cron(0 10 ? * MON-FRI *)'  # 10:00 AM EST
       State: ENABLED
       Targets:
-        - Arn: !GetAtt MonitorTradesLambda.Arn
-          Id: 'NormalMonitorTradesTarget1b'
-          Input: '{"source": "monitor-trades-schedule", "window": "morning", "dayType": "normal"}'
+        - Arn: !GetAtt ConvertExitOrdersToMarketLambda.Arn
+          Id: 'NormalConvertExitOrdersTarget1b'
+          Input: '{"source": "convert-exit-orders-schedule", "window": "morning", "dayType": "normal"}'
 
-  # Normal Day Afternoon Window (3:46-4:00 PM EST) - Every minute
-  NormalMonitorTradesRule2:
+  # Afternoon Window: UpdateEntryOrdersLambda (first 10 times: 3:46-3:55 PM EST)
+  NormalUpdateEntryOrdersRule2:
     Type: AWS::Events::Rule
     Properties:
-      Name: !Sub '${Environment}-normal-monitor-trades-rule-2'
-      Description: 'Triggers MonitorTradesLambda every minute during 3:46-4:00 PM EST on normal trading days'
-      ScheduleExpression: 'cron(46-59 15 ? * MON-FRI *)'  # 3:46-3:59 PM EST every minute
+      Name: !Sub '${Environment}-normal-update-entry-orders-rule-2'
+      Description: 'Triggers UpdateEntryOrdersAtMarketLambda every minute during 3:46-3:55 PM EST on normal trading days'
+      ScheduleExpression: 'cron(46-55 15 ? * MON-FRI *)'  # 3:46-3:55 PM EST every minute
       State: ENABLED
       Targets:
-        - Arn: !GetAtt MonitorTradesLambda.Arn
-          Id: 'NormalMonitorTradesTarget2'
-          Input: '{"source": "monitor-trades-schedule", "window": "afternoon", "dayType": "normal"}'
+        - Arn: !GetAtt UpdateEntryOrdersAtMarketLambda.Arn
+          Id: 'NormalUpdateEntryOrdersTarget2'
+          Input: '{"source": "update-entry-orders-schedule", "window": "afternoon", "dayType": "normal"}'
 
-  NormalMonitorTradesRule2b:
+  # Afternoon Window: CancelEntryOrdersLambda (last 6 times: 3:56-4:00 PM EST)
+  NormalCancelEntryOrdersRule2:
     Type: AWS::Events::Rule
     Properties:
-      Name: !Sub '${Environment}-normal-monitor-trades-rule-2b'
-      Description: 'Triggers MonitorTradesLambda at 4:00 PM EST on normal trading days'
+      Name: !Sub '${Environment}-normal-cancel-entry-orders-rule-2'
+      Description: 'Triggers CancelEntryOrdersLambda every minute during 3:56-4:00 PM EST on normal trading days'
+      ScheduleExpression: 'cron(56-59 15 ? * MON-FRI *)'  # 3:56-3:59 PM EST every minute
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CancelEntryOrdersLambda.Arn
+          Id: 'NormalCancelEntryOrdersTarget2'
+          Input: '{"source": "cancel-entry-orders-schedule", "window": "afternoon", "dayType": "normal"}'
+
+  NormalCancelEntryOrdersRule2b:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-normal-cancel-entry-orders-rule-2b'
+      Description: 'Triggers CancelEntryOrdersLambda at 4:00 PM EST on normal trading days'
       ScheduleExpression: 'cron(0 16 ? * MON-FRI *)'  # 4:00 PM EST
       State: ENABLED
       Targets:
-        - Arn: !GetAtt MonitorTradesLambda.Arn
-          Id: 'NormalMonitorTradesTarget2b'
-          Input: '{"source": "monitor-trades-schedule", "window": "afternoon", "dayType": "normal"}'
+        - Arn: !GetAtt CancelEntryOrdersLambda.Arn
+          Id: 'NormalCancelEntryOrdersTarget2b'
+          Input: '{"source": "cancel-entry-orders-schedule", "window": "afternoon", "dayType": "normal"}'
 
 
   # Early Closure Day Rules
@@ -425,7 +540,7 @@ Resources:
         - Arn: !GetAtt StockFilterLambda.Arn
           Id: 'EarlyStockFilterTarget'
           InputTransformer:
-            InputTemplate: '{"source": "stock-filter-schedule", "scanDate": "<aws.events.rule.schedule-time>"}'
+            InputTemplate: '{"source": "stock-filter-schedule"}'
 
   EarlyInitiateTradesRule:
     Type: AWS::Events::Rule
@@ -438,7 +553,7 @@ Resources:
         - Arn: !GetAtt InitiateTradesLambda.Arn
           Id: 'EarlyInitiateTradesTarget'
           InputTransformer:
-            InputTemplate: '{"source": "initiate-trades-schedule", "scanDate": "<aws.events.rule.schedule-time>"}'
+            InputTemplate: '{"source": "initiate-trades-schedule"}'
 
   EarlyInitiateExitTradesRule:
     Type: AWS::Events::Rule
@@ -452,56 +567,95 @@ Resources:
           Id: 'EarlyInitiateExitTradesTarget'
           Input: '{"source": "initiate-exit-trades-schedule"}'
 
-  # Early closure MonitorTradesLambda rules
-  # Early Closure Day Morning Window (9:46-10:00 AM EST) - Every minute
-  EarlyMonitorTradesRule1:
+  # Early Closure Day Rules - Using Single-Purpose Lambdas
+  # Early Closure Day Morning Window: UpdateExitOrdersLambda (first 10 times: 9:46-9:55 AM EST)
+  EarlyUpdateExitOrdersRule1:
     Type: AWS::Events::Rule
     Properties:
-      Name: !Sub '${Environment}-early-monitor-trades-rule-1'
-      Description: 'Triggers MonitorTradesLambda every minute during 9:46-10:00 AM EST on early closure days'
-      ScheduleExpression: 'cron(46-59 9 ? * MON-FRI *)'  # 9:46-9:59 AM EST every minute
+      Name: !Sub '${Environment}-early-update-exit-orders-rule-1'
+      Description: 'Triggers UpdateExitOrdersAtMarketLambda every minute during 9:46-9:55 AM EST on early closure days'
+      ScheduleExpression: 'cron(46-55 9 ? * MON-FRI *)'  # 9:46-9:55 AM EST every minute
       State: DISABLED  # Will be enabled dynamically
       Targets:
-        - Arn: !GetAtt MonitorTradesLambda.Arn
-          Id: 'EarlyMonitorTradesTarget1'
-          Input: '{"source": "monitor-trades-schedule", "window": "morning", "dayType": "early"}'
+        - Arn: !GetAtt UpdateExitOrdersAtMarketLambda.Arn
+          Id: 'EarlyUpdateExitOrdersTarget1'
+          Input: '{"source": "update-exit-orders-schedule", "window": "morning", "dayType": "early"}'
 
-  EarlyMonitorTradesRule1b:
+  # Early Closure Day Morning Window: UpdateExitOrdersSimpleLambda (11th and 12th times: 9:56-9:57 AM EST)
+  EarlyUpdateExitOrdersSimpleRule1:
     Type: AWS::Events::Rule
     Properties:
-      Name: !Sub '${Environment}-early-monitor-trades-rule-1b'
-      Description: 'Triggers MonitorTradesLambda at 10:00 AM EST on early closure days'
+      Name: !Sub '${Environment}-early-update-exit-orders-simple-rule-1'
+      Description: 'Triggers UpdateExitOrdersAtDiscountLambda at 9:56-9:57 AM EST on early closure days'
+      ScheduleExpression: 'cron(56-57 9 ? * MON-FRI *)'  # 9:56-9:57 AM EST
+      State: DISABLED  # Will be enabled dynamically
+      Targets:
+        - Arn: !GetAtt UpdateExitOrdersAtDiscountLambda.Arn
+          Id: 'EarlyUpdateExitOrdersSimpleTarget1'
+          Input: '{"source": "update-exit-orders-simple-schedule", "window": "morning", "dayType": "early"}'
+
+  # Early Closure Day Morning Window: ConvertExitOrdersLambda (last 3 times: 9:58-9:59 AM EST + 10:00 AM)
+  EarlyConvertExitOrdersRule1:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-early-convert-exit-orders-rule-1'
+      Description: 'Triggers ConvertExitOrdersToMarketLambda every minute during 9:58-9:59 AM EST on early closure days'
+      ScheduleExpression: 'cron(58-59 9 ? * MON-FRI *)'  # 9:58-9:59 AM EST every minute
+      State: DISABLED  # Will be enabled dynamically
+      Targets:
+        - Arn: !GetAtt ConvertExitOrdersToMarketLambda.Arn
+          Id: 'EarlyConvertExitOrdersTarget1'
+          Input: '{"source": "convert-exit-orders-schedule", "window": "morning", "dayType": "early"}'
+
+  EarlyConvertExitOrdersRule1b:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-early-convert-exit-orders-rule-1b'
+      Description: 'Triggers ConvertExitOrdersToMarketLambda at 10:00 AM EST on early closure days'
       ScheduleExpression: 'cron(0 10 ? * MON-FRI *)'  # 10:00 AM EST
       State: DISABLED  # Will be enabled dynamically
       Targets:
-        - Arn: !GetAtt MonitorTradesLambda.Arn
-          Id: 'EarlyMonitorTradesTarget1b'
-          Input: '{"source": "monitor-trades-schedule", "window": "morning", "dayType": "early"}'
+        - Arn: !GetAtt ConvertExitOrdersToMarketLambda.Arn
+          Id: 'EarlyConvertExitOrdersTarget1b'
+          Input: '{"source": "convert-exit-orders-schedule", "window": "morning", "dayType": "early"}'
 
-  # Early Closure Day Afternoon Window (12:46-1:00 PM EST) - Every minute
-  EarlyMonitorTradesRule2:
+  # Early Closure Day Afternoon Window: UpdateEntryOrdersLambda (first 10 times: 12:46-12:55 PM EST)
+  EarlyUpdateEntryOrdersRule2:
     Type: AWS::Events::Rule
     Properties:
-      Name: !Sub '${Environment}-early-monitor-trades-rule-2'
-      Description: 'Triggers MonitorTradesLambda every minute during 12:46-1:00 PM EST on early closure days'
-      ScheduleExpression: 'cron(46-59 12 ? * MON-FRI *)'  # 12:46-12:59 PM EST every minute
+      Name: !Sub '${Environment}-early-update-entry-orders-rule-2'
+      Description: 'Triggers UpdateEntryOrdersAtMarketLambda every minute during 12:46-12:55 PM EST on early closure days'
+      ScheduleExpression: 'cron(46-55 12 ? * MON-FRI *)'  # 12:46-12:55 PM EST every minute
       State: DISABLED  # Will be enabled dynamically
       Targets:
-        - Arn: !GetAtt MonitorTradesLambda.Arn
-          Id: 'EarlyMonitorTradesTarget2'
-          Input: '{"source": "monitor-trades-schedule", "window": "afternoon", "dayType": "early"}'
+        - Arn: !GetAtt UpdateEntryOrdersAtMarketLambda.Arn
+          Id: 'EarlyUpdateEntryOrdersTarget2'
+          Input: '{"source": "update-entry-orders-schedule", "window": "afternoon", "dayType": "early"}'
 
-  EarlyMonitorTradesRule2b:
+  # Early Closure Day Afternoon Window: CancelEntryOrdersLambda (last 6 times: 12:56-1:00 PM EST)
+  EarlyCancelEntryOrdersRule2:
     Type: AWS::Events::Rule
     Properties:
-      Name: !Sub '${Environment}-early-monitor-trades-rule-2b'
-      Description: 'Triggers MonitorTradesLambda at 1:00 PM EST on early closure days'
+      Name: !Sub '${Environment}-early-cancel-entry-orders-rule-2'
+      Description: 'Triggers CancelEntryOrdersLambda every minute during 12:56-1:00 PM EST on early closure days'
+      ScheduleExpression: 'cron(56-59 12 ? * MON-FRI *)'  # 12:56-12:59 PM EST every minute
+      State: DISABLED  # Will be enabled dynamically
+      Targets:
+        - Arn: !GetAtt CancelEntryOrdersLambda.Arn
+          Id: 'EarlyCancelEntryOrdersTarget2'
+          Input: '{"source": "cancel-entry-orders-schedule", "window": "afternoon", "dayType": "early"}'
+
+  EarlyCancelEntryOrdersRule2b:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-early-cancel-entry-orders-rule-2b'
+      Description: 'Triggers CancelEntryOrdersLambda at 1:00 PM EST on early closure days'
       ScheduleExpression: 'cron(0 13 ? * MON-FRI *)'  # 1:00 PM EST
       State: DISABLED  # Will be enabled dynamically
       Targets:
-        - Arn: !GetAtt MonitorTradesLambda.Arn
-          Id: 'EarlyMonitorTradesTarget2b'
-          Input: '{"source": "monitor-trades-schedule", "window": "afternoon", "dayType": "early"}'
+        - Arn: !GetAtt CancelEntryOrdersLambda.Arn
+          Id: 'EarlyCancelEntryOrdersTarget2b'
+          Input: '{"source": "cancel-entry-orders-schedule", "window": "afternoon", "dayType": "early"}'
 
   # Table Cleanup Rules - 30 minutes after ScanEarningsLambda
   # Early Closure Cleanup (1:00 PM EST)
@@ -588,21 +742,54 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt NormalInitiateExitTradesRule.Arn
 
-  NormalMonitorTradesPermission1:
+  # New Single-Purpose Lambda Permissions
+  NormalUpdateExitOrdersPermission1:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref MonitorTradesLambda
+      FunctionName: !Ref UpdateExitOrdersAtMarketLambda
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
-      SourceArn: !GetAtt NormalMonitorTradesRule1.Arn
+      SourceArn: !GetAtt NormalUpdateExitOrdersRule1.Arn
 
-  NormalMonitorTradesPermission2:
+  NormalConvertExitOrdersPermission1:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref MonitorTradesLambda
+      FunctionName: !Ref ConvertExitOrdersToMarketLambda
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
-      SourceArn: !GetAtt NormalMonitorTradesRule2.Arn
+      SourceArn: !GetAtt NormalConvertExitOrdersRule1.Arn
+
+  NormalConvertExitOrdersPermission1b:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ConvertExitOrdersToMarketLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NormalConvertExitOrdersRule1b.Arn
+
+  NormalUpdateEntryOrdersPermission2:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref UpdateEntryOrdersAtMarketLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NormalUpdateEntryOrdersRule2.Arn
+
+  NormalCancelEntryOrdersPermission2:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CancelEntryOrdersLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NormalCancelEntryOrdersRule2.Arn
+
+  NormalUpdateExitOrdersSimplePermission1:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref UpdateExitOrdersAtDiscountLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NormalUpdateExitOrdersSimpleRule1.Arn
 
   # Early Closure Day Lambda Permissions
   EarlyScanEarningsPermission:
@@ -637,21 +824,54 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt EarlyInitiateExitTradesRule.Arn
 
-  EarlyMonitorTradesPermission1:
+  # Early Closure Day Single-Purpose Lambda Permissions
+  EarlyUpdateExitOrdersPermission1:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref MonitorTradesLambda
+      FunctionName: !Ref UpdateExitOrdersAtMarketLambda
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
-      SourceArn: !GetAtt EarlyMonitorTradesRule1.Arn
+      SourceArn: !GetAtt EarlyUpdateExitOrdersRule1.Arn
 
-  EarlyMonitorTradesPermission2:
+  EarlyConvertExitOrdersPermission1:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref MonitorTradesLambda
+      FunctionName: !Ref ConvertExitOrdersToMarketLambda
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
-      SourceArn: !GetAtt EarlyMonitorTradesRule2.Arn
+      SourceArn: !GetAtt EarlyConvertExitOrdersRule1.Arn
+
+  EarlyConvertExitOrdersPermission1b:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ConvertExitOrdersToMarketLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EarlyConvertExitOrdersRule1b.Arn
+
+  EarlyUpdateEntryOrdersPermission2:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref UpdateEntryOrdersAtMarketLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EarlyUpdateEntryOrdersRule2.Arn
+
+  EarlyCancelEntryOrdersPermission2:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CancelEntryOrdersLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EarlyCancelEntryOrdersRule2.Arn
+
+  EarlyUpdateExitOrdersSimplePermission1:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref UpdateExitOrdersAtDiscountLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EarlyUpdateExitOrdersSimpleRule1.Arn
 
   TableCleanupEarlyPermission:
     Type: AWS::Lambda::Permission
@@ -660,6 +880,22 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt TableCleanupEarlyRule.Arn
+
+  NormalCancelEntryOrdersPermission2b:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CancelEntryOrdersLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NormalCancelEntryOrdersRule2b.Arn
+
+  EarlyCancelEntryOrdersPermission2b:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CancelEntryOrdersLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EarlyCancelEntryOrdersRule2b.Arn
 
   TableCleanupNormalPermission:
     Type: AWS::Lambda::Permission

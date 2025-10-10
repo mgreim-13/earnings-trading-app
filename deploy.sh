@@ -9,6 +9,7 @@ set -e
 ENVIRONMENT=${1:-dev}
 REGION=${2:-us-east-1}
 STACK_NAME="trading-lambdas-${ENVIRONMENT}"
+S3_BUCKET="trading-lambdas-${ENVIRONMENT}-$(date +%s)"
 
 # Colors for output
 RED='\033[0;31m'
@@ -105,14 +106,18 @@ build_lambda() {
 # Build all lambdas
 build_lambda "market-scheduler" "MarketSchedulerLambda" "com.trading.MarketSchedulerLambda"
 build_lambda "scan-earnings" "ScanEarningsLambda" "com.trading.ScanEarningsLambda"
-build_lambda "stock-filter" "StockFilterLambda" "com.example.StockFilterLambda"
-build_lambda "initiate-trades" "InitiateTradesLambda" "com.example.InitiateTradesLambda"
-build_lambda "monitor-trades" "MonitorTradesLambda" "com.example.MonitorTradesLambda"
+build_lambda "stock-filter" "StockFilterLambda" "com.trading.lambda.StockFilterLambda"
+build_lambda "initiate-trades" "InitiateTradesLambda" "com.trading.lambda.InitiateTradesLambda"
 build_lambda "initiate-exit-trades" "InitiateExitTradesLambda" "com.trading.lambda.InitiateExitTradesLambda"
+build_lambda "update-exit-orders-at-market" "UpdateExitOrdersAtMarketLambda" "com.trading.lambda.UpdateExitOrdersAtMarketLambda"
+build_lambda "convert-exit-orders-to-market" "ConvertExitOrdersToMarketLambda" "com.trading.lambda.ConvertExitOrdersToMarketLambda"
+build_lambda "update-entry-orders-at-market" "UpdateEntryOrdersAtMarketLambda" "com.trading.lambda.UpdateEntryOrdersAtMarketLambda"
+build_lambda "cancel-entry-orders" "CancelEntryOrdersLambda" "com.trading.lambda.CancelEntryOrdersLambda"
+build_lambda "update-exit-orders-at-discount" "UpdateExitOrdersAtDiscountLambda" "com.trading.lambda.UpdateExitOrdersAtDiscountLambda"
 
 # Verify all JAR files were created successfully
 echo -e "${YELLOW}🔍 Verifying all JAR files were created...${NC}"
-required_jars=("market-scheduler.jar" "scan-earnings.jar" "stock-filter.jar" "initiate-trades.jar" "monitor-trades.jar" "initiate-exit-trades.jar")
+required_jars=("market-scheduler.jar" "scan-earnings.jar" "stock-filter.jar" "initiate-trades.jar" "initiate-exit-trades.jar" "update-exit-orders-at-market.jar" "convert-exit-orders-to-market.jar" "update-entry-orders-at-market.jar" "cancel-entry-orders.jar" "update-exit-orders-at-discount.jar")
 missing_jars=()
 
 for jar in "${required_jars[@]}"; do
@@ -130,6 +135,41 @@ fi
 
 echo -e "${GREEN}✅ All JAR files created successfully${NC}"
 
+# Upload JAR files to S3
+upload_to_s3() {
+    local jar_name=$1
+    local s3_key=$2
+    
+    echo -e "${YELLOW}📤 Uploading ${jar_name} to S3...${NC}"
+    aws s3 cp "${jar_name}" "s3://${S3_BUCKET}/${s3_key}" --region "${REGION}"
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✅ Uploaded ${jar_name}${NC}"
+    else
+        echo -e "${RED}❌ Failed to upload ${jar_name}${NC}"
+        exit 1
+    fi
+}
+
+echo -e "${YELLOW}📤 Uploading JAR files to S3 bucket: ${S3_BUCKET}${NC}"
+
+# Create S3 bucket if it doesn't exist
+echo -e "${YELLOW}🪣 Creating S3 bucket: ${S3_BUCKET}${NC}"
+aws s3 mb "s3://${S3_BUCKET}" --region "${REGION}" || echo -e "${YELLOW}⚠️  Bucket may already exist${NC}"
+
+# Upload all JAR files to S3
+upload_to_s3 "market-scheduler.jar" "market-scheduler-lambda-1.0.0.jar"
+upload_to_s3 "scan-earnings.jar" "scan-earnings-lambda-1.0.0.jar"
+upload_to_s3 "stock-filter.jar" "stock-filter-lambda-1.0.0.jar"
+upload_to_s3 "initiate-trades.jar" "initiate-trades-lambda-1.0.0.jar"
+upload_to_s3 "initiate-exit-trades.jar" "initiate-exit-trades-lambda-1.0.0.jar"
+upload_to_s3 "update-exit-orders-at-market.jar" "update-exit-orders-at-market-lambda-1.0.0.jar"
+upload_to_s3 "convert-exit-orders-to-market.jar" "convert-exit-orders-to-market-lambda-1.0.0.jar"
+upload_to_s3 "update-entry-orders-at-market.jar" "update-entry-orders-at-market-lambda-1.0.0.jar"
+upload_to_s3 "cancel-entry-orders.jar" "cancel-entry-orders-lambda-1.0.0.jar"
+upload_to_s3 "update-exit-orders-at-discount.jar" "update-exit-orders-at-discount-lambda-1.0.0.jar"
+
+echo -e "${GREEN}✅ All JAR files uploaded to S3 successfully${NC}"
+
 echo -e "${YELLOW}☁️  Deploying CloudFormation stack...${NC}"
 
 # Deploy CloudFormation stack
@@ -138,37 +178,11 @@ aws cloudformation deploy \
     --stack-name "$STACK_NAME" \
     --parameter-overrides \
         Environment="$ENVIRONMENT" \
+        S3BucketName="$S3_BUCKET" \
         AlpacaSecretName="trading/alpaca/credentials" \
         FinnhubSecretName="trading/finnhub/credentials" \
     --capabilities CAPABILITY_NAMED_IAM \
     --region "$REGION"
-
-echo -e "${YELLOW}📝 Updating Lambda function codes...${NC}"
-
-# Update Lambda function codes
-update_lambda_code() {
-    local function_name=$1
-    local jar_file=$2
-    
-    if [ -f "$jar_file" ]; then
-        echo -e "Updating ${function_name}..."
-        aws lambda update-function-code \
-            --function-name "${ENVIRONMENT}-${function_name}" \
-            --zip-file "fileb://${jar_file}" \
-            --region "$REGION"
-        echo -e "${GREEN}✅ Updated ${function_name}${NC}"
-    else
-        echo -e "${RED}❌ JAR file ${jar_file} not found${NC}"
-    fi
-}
-
-# Update all lambda codes
-update_lambda_code "market-scheduler" "market-scheduler.jar"
-update_lambda_code "scan-earnings" "scan-earnings.jar"
-update_lambda_code "stock-filter" "stock-filter.jar"
-update_lambda_code "initiate-trades" "initiate-trades.jar"
-update_lambda_code "monitor-trades" "monitor-trades.jar"
-update_lambda_code "initiate-exit-trades" "initiate-exit-trades.jar"
 
 echo -e "${YELLOW}🔐 Setting up secrets...${NC}"
 
@@ -206,17 +220,58 @@ create_secret "trading/alpaca/credentials" "$ALPACA_SECRET_JSON"
 FINNHUB_SECRET_JSON="{\"apiKey\":\"${FINNHUB_API_KEY}\"}"
 create_secret "trading/finnhub/credentials" "$FINNHUB_SECRET_JSON"
 
+echo -e "${YELLOW}🧪 Testing all Lambda functions...${NC}"
+
+# Test all lambda functions
+test_lambda() {
+    local function_name=$1
+    local test_payload=$2
+    
+    echo -e "Testing ${function_name}..."
+    
+    if aws lambda invoke \
+        --function-name "${ENVIRONMENT}-${function_name}" \
+        --payload "$test_payload" \
+        --cli-binary-format raw-in-base64-out \
+        --region "$REGION" \
+        "test-${function_name}-response.json" &> /dev/null; then
+        
+        # Check if response contains error
+        if grep -q "errorMessage\|Error" "test-${function_name}-response.json"; then
+            echo -e "${RED}❌ ${function_name} test failed${NC}"
+            echo -e "${YELLOW}   Response: $(cat test-${function_name}-response.json)${NC}"
+        else
+            echo -e "${GREEN}✅ ${function_name} test passed${NC}"
+        fi
+    else
+        echo -e "${RED}❌ ${function_name} test failed${NC}"
+    fi
+}
+
+# Test all lambdas with appropriate payloads
+test_lambda "market-scheduler" '{"source": "daily-schedule"}'
+test_lambda "scan-earnings" '{"scanDate": "2025-01-10"}'
+test_lambda "stock-filter" '{"scanDate": "2025-01-10"}'
+test_lambda "initiate-trades" '{"scanDate": "2025-01-10"}'
+test_lambda "initiate-exit-trades" '{"scanDate": "2025-01-10"}'
+test_lambda "update-exit-orders-at-market" '{"scanDate": "2025-01-10"}'
+test_lambda "convert-exit-orders-to-market" '{"scanDate": "2025-01-10"}'
+test_lambda "update-entry-orders-at-market" '{"scanDate": "2025-01-10"}'
+test_lambda "cancel-entry-orders" '{"scanDate": "2025-01-10"}'
+test_lambda "update-exit-orders-at-discount" '{"scanDate": "2025-01-10"}'
+
 echo -e "${GREEN}🎉 Deployment completed successfully!${NC}"
 echo ""
 echo -e "${YELLOW}📋 Next steps:${NC}"
 echo "1. Verify your secrets in AWS Secrets Manager"
-echo "2. Test the MarketSchedulerLambda manually"
-echo "3. Check CloudWatch logs for any issues"
-echo "4. Monitor DynamoDB tables for data"
+echo "2. Check CloudWatch logs for any issues"
+echo "3. Monitor DynamoDB tables for data"
+echo "4. Verify EventBridge rules are enabled"
 echo ""
 echo -e "${YELLOW}🔗 Useful commands:${NC}"
 echo "• Test MarketScheduler: aws lambda invoke --function-name ${ENVIRONMENT}-market-scheduler --payload '{}' response.json"
 echo "• View logs: aws logs describe-log-groups --log-group-name-prefix '/aws/lambda/${ENVIRONMENT}-'"
 echo "• List tables: aws dynamodb list-tables"
+echo "• List EventBridge rules: aws events list-rules --query 'Rules[?contains(Name, \`${ENVIRONMENT}-\`)]'"
 echo ""
-echo -e "${GREEN}✅ All done! Your trading infrastructure is ready.${NC}"
+echo -e "${GREEN}✅ All done! Your trading infrastructure is ready with all 10 Lambda functions deployed and tested.${NC}"

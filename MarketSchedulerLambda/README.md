@@ -27,10 +27,6 @@ This Lambda function provides conditional scheduling for all trading-related Lam
 - **Early Closure Days**: 12:45 PM EST
 - **Holidays**: Skipped
 
-### MonitorTradesLambda
-- **Normal Days**: Every 30 seconds from 9:45:30 AM to 10:00 AM EST and 3:45:30 PM to 4:00 PM EST
-- **Early Closure Days**: Same morning slot and 12:45:30 PM to 1:00 PM EST
-- **Holidays**: Skipped
 
 ### InitiateExitTradesLambda
 - **All Market Days**: 9:45 AM EST (M-F, non-holidays and early closure days)
@@ -54,7 +50,6 @@ This Lambda function provides conditional scheduling for all trading-related Lam
 - `SCAN_EARNINGS_LAMBDA`: Name of the ScanEarningsLambda function
 - `STOCK_FILTER_LAMBDA`: Name of the StockFilterLambda function
 - `INITIATE_TRADES_LAMBDA`: Name of the InitiateTradesLambda function
-- `MONITOR_TRADES_LAMBDA`: Name of the MonitorTradesLambda function
 - `INITIATE_EXIT_TRADES_LAMBDA`: Name of the InitiateExitTradesLambda function
 
 ## Deployment

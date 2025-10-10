@@ -306,7 +306,7 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
     
     /**
      * Calculate the credit for exiting a calendar spread
-     * Calendar spread exit: farBid - nearAsk (opposite of entry: nearBid - farAsk)
+     * Calendar spread exit: farBid - nearAsk (opposite of entry: farAsk - nearBid)
      */
     private double calculateExitCredit(List<Position> positions) {
         return executeWithErrorHandling("calculating calendar spread exit credit", () -> {
@@ -353,7 +353,7 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
             double farBid = JsonParsingUtils.getBidPrice(farQuote);
             double nearAsk = JsonParsingUtils.getAskPrice(nearQuote);
             
-            // Calculate credit: farBid - nearAsk (opposite of entry debit: nearBid - farAsk)
+            // Calculate credit: farBid - nearAsk (opposite of entry debit: farAsk - nearBid)
             double credit = Math.max(0.0, farBid - nearAsk);
             
             log.info("Calendar spread exit credit calculation: farBid={}, nearAsk={}, credit={}", 
@@ -375,6 +375,11 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
                 return false;
             }
             
+            log.info("DEBUG: submitExitOrder called with {} positions", positions.size());
+            for (Position position : positions) {
+                log.info("DEBUG: Position: symbol={}, qty={}, side={}", position.getSymbol(), position.getQty(), position.getSide());
+            }
+            
             // Convert Position objects to Map format for reusable utility
             List<Map<String, Object>> positionMaps = new ArrayList<>();
             for (Position position : positions) {
@@ -385,8 +390,12 @@ public class InitiateExitTradesLambda implements RequestHandler<APIGatewayProxyR
                 positionMaps.add(positionMap);
             }
             
+            log.info("DEBUG: Converted positionMaps: {}", positionMaps);
+            
             // Use reusable utility to create and submit market order
+            log.info("DEBUG: Calling ExitOrderUtils.createCalendarSpreadExitOrder with positionMaps={}, orderType=market", positionMaps);
             String exitOrderJson = ExitOrderUtils.createCalendarSpreadExitOrder(positionMaps, "market");
+            log.info("DEBUG: ExitOrderUtils returned: {}", exitOrderJson);
             log.info("Created exit order JSON: {}", exitOrderJson);
             
             // Use existing submitOrder pattern from InitiateTradesLambda

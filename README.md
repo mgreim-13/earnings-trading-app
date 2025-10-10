@@ -31,7 +31,6 @@ This system automates the entire earnings trading workflow from scanning potenti
 | **ScanEarningsLambda** | Scans earnings calendar for opportunities | 3:30 PM EST (Mon-Fri) | 512MB | 300s |
 | **StockFilterLambda** | Advanced stock filtering with 6 criteria | 3:35 PM EST (Mon-Fri) | 512MB | 300s |
 | **InitiateTradesLambda** | Executes debit calendar spreads | 3:45 PM EST (Mon-Fri) | 1024MB | 300s |
-| **MonitorTradesLambda** | Monitors open positions | Every 30s during market hours | 512MB | 300s |
 | **InitiateExitTradesLambda** | Closes positions at market open | 9:45 AM EST (Mon-Fri) | 1024MB | 300s |
 
 ## 📊 Trading Strategy
